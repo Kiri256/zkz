@@ -1,0 +1,65 @@
+{
+  "name": "zkz-keil",
+  "displayName": "zkz Keil",
+  "description": "Keil UV4 build, J-Link flash, and Cortex-Debug prepare. Sandbox builds call zkz-sandbox.toGb.",
+  "version": "1.0.0",
+  "publisher": "zkz",
+  "icon": "media/zkz-keil.png",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onTaskType:zkz-keil"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "zkz-keil.keilBuild",
+        "title": "zkz: Keil Build",
+        "icon": "$(tools)",
+        "enablement": "zkzKeil.paired"
+      },
+      {
+        "command": "zkz-keil.keilRebuild",
+        "title": "zkz: Keil Rebuild",
+        "icon": "$(sync)",
+        "enablement": "zkzKeil.paired"
+      },
+      {
+        "command": "zkz-keil.keilFlash",
+        "title": "zkz: J-Link Flash",
+        "icon": "$(zap)",
+        "enablement": "zkzKeil.paired"
+      },
+      {
+        "command": "zkz-keil.prepareCortexDebug",
+        "title": "zkz: Prepare Cortex Debug",
+        "icon": "$(debug-alt)",
+        "enablement": "zkzKeil.paired"
+      }
+    ],
+    "taskDefinitions": [
+      {
+        "type": "zkz-keil",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "build, rebuild, flash, prepare, buildFlash, buildFlashPrepare, flashPrepare"
+          }
+        }
+      }
+    ]
+  },
+  "scripts": {},
+  "dependencies": {
+    "iconv-lite": "^0.6.3"
+  }
+}

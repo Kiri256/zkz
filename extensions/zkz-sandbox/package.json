@@ -1,0 +1,847 @@
+{
+  "name": "zkz-sandbox",
+  "displayName": "zkz Sandbox",
+  "description": "True-source Git sidebar, file operations, and true-source/UTF-8 sync. Exposes zkz-sandbox.toUtf / toGb / copyDebugAxf for other extensions.",
+  "version": "1.0.0",
+  "publisher": "zkz",
+  "icon": "media/zkz-sandbox.png",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:zkzSandboxBranches",
+    "onView:zkzSandboxChanges",
+    "onView:zkzSandboxFiles",
+    "workspaceContains:.zkz/.workspace_sync_meta.json",
+    "workspaceContains:.workspace_sync_meta.json"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "zkz-sandbox",
+          "title": "zkz Sandbox",
+          "icon": "media/zkz-sandbox.svg",
+          "when": "zkzSandbox.paired"
+        }
+      ]
+    },
+    "views": {
+      "zkz-sandbox": [
+        {
+          "id": "zkzSandboxChanges",
+          "name": "更改",
+          "when": "zkzSandbox.paired"
+        },
+        {
+          "id": "zkzSandboxBranches",
+          "name": "分支",
+          "when": "zkzSandbox.paired"
+        },
+        {
+          "id": "zkzSandboxFiles",
+          "name": "本源文件",
+          "when": "zkzSandbox.paired"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "zkz-sandbox.refreshChanges",
+        "title": "刷新更改",
+        "icon": "$(refresh)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.refreshFiles",
+        "title": "刷新本源文件",
+        "icon": "$(refresh)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.refresh",
+        "title": "刷新分支（抓取远程并重载）",
+        "icon": "$(refresh)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.viewAsList",
+        "title": "以列表形式查看",
+        "icon": "$(list-flat)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.viewAsTree",
+        "title": "以树形式查看",
+        "icon": "$(list-tree)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.pull",
+        "title": "拉取",
+        "icon": "$(cloud-download)",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.push",
+        "title": "推送",
+        "icon": "$(cloud-upload)",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.publishBranch",
+        "title": "发布此分支",
+        "icon": "$(cloud-upload)",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.checkoutTo",
+        "title": "签出到...",
+        "icon": "$(git-branch)",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.fetch",
+        "title": "抓取",
+        "icon": "$(sync)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.fetchAll",
+        "title": "抓取全部远程分支",
+        "icon": "$(cloud-download)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.commit",
+        "title": "提交",
+        "icon": "$(check)",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.undoLastCommit",
+        "title": "撤销上一次修改",
+        "icon": "$(discard)",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.branchCreate",
+        "title": "创建分支...",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.branchDelete",
+        "title": "删除分支...",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.branchRename",
+        "title": "重命名分支...",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.showOutput",
+        "title": "显示 GIT 输出"
+      },
+      {
+        "command": "zkz-sandbox.checkout",
+        "title": "签出",
+        "icon": "$(check)",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.openChange",
+        "title": "查看差异",
+        "icon": "$(diff)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.stageFile",
+        "title": "暂存",
+        "icon": "$(add)",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.unstageFile",
+        "title": "取消暂存",
+        "icon": "$(remove)",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.discardFile",
+        "title": "放弃更改",
+        "icon": "$(discard)",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.discardAllChanges",
+        "title": "撤销全部更改",
+        "icon": "$(discard)",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.syncFrom",
+        "title": "回写沙箱 → 本源",
+        "icon": "$(arrow-up)",
+        "enablement": "zkzSandbox.sandbox"
+      },
+      {
+        "command": "zkz-sandbox.pullSandbox",
+        "title": "拉取本源 → 沙箱",
+        "icon": "$(arrow-down)",
+        "enablement": "zkzSandbox.sandbox"
+      },
+      {
+        "command": "zkz-sandbox.openW1Explorer",
+        "title": "在资源管理器中显示本源"
+      },
+      {
+        "command": "zkz-sandbox.openW1Terminal",
+        "title": "在真源目录打开终端",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "zkz-sandbox.checkoutBranch",
+        "title": "zkz: 打开本源 Git 视图",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.filterBranches",
+        "title": "筛选分支...",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.pickBranch",
+        "title": "筛选并切换本源分支...",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.showCommit",
+        "title": "查看提交详情",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.stash",
+        "title": "储存",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.stashPop",
+        "title": "应用并删除最新储存",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.stashApply",
+        "title": "应用储存",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.stashDrop",
+        "title": "删除储存",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.openCommitFile",
+        "title": "打开提交中的文件",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.syncMenu",
+        "title": "zkz: 同步菜单",
+        "icon": "$(sync)",
+        "enablement": "zkzSandbox.sandbox"
+      },
+      {
+        "command": "zkz-sandbox.toUtf",
+        "title": "zkz: ToUtf (stamp差)",
+        "icon": "$(arrow-down)",
+        "enablement": "zkzSandbox.sandbox"
+      },
+      {
+        "command": "zkz-sandbox.toUtfLibs",
+        "title": "zkz: ToUtf (仅库)",
+        "enablement": "zkzSandbox.sandbox"
+      },
+      {
+        "command": "zkz-sandbox.toGb",
+        "title": "zkz: ToGb (stamp差)",
+        "icon": "$(arrow-up)",
+        "enablement": "zkzSandbox.sandbox"
+      },
+      {
+        "command": "zkz-sandbox.copyDebugAxf",
+        "title": "zkz: Copy debug axf"
+      },
+      {
+        "command": "zkz-sandbox.toGbLibs",
+        "title": "zkz: ToGb (libs) 回写库→本源",
+        "icon": "$(library)",
+        "enablement": "zkzSandbox.sandbox"
+      },
+      {
+        "command": "zkz-sandbox.toUtfFull",
+        "title": "zkz: ToUtf Full",
+        "enablement": "zkzSandbox.sandbox"
+      },
+      {
+        "command": "zkz-sandbox.refreshStatus",
+        "title": "zkz: 刷新状态栏"
+      },
+      {
+        "command": "zkz-sandbox.showDashboard",
+        "title": "zkz: 同步/编码仪表盘",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "zkz-sandbox.diffSandboxW1",
+        "title": "zkz: 本源 ↔ 沙箱对比",
+        "icon": "$(diff)",
+        "enablement": "zkzSandbox.sandbox"
+      },
+      {
+        "command": "zkz-sandbox.diffSandboxW1Batch",
+        "title": "zkz: 批量扫描本源↔沙箱差异",
+        "icon": "$(search)",
+        "enablement": "zkzSandbox.sandbox"
+      },
+      {
+        "command": "zkz-sandbox.commitMessageAccept",
+        "title": "完成提交"
+      },
+      {
+        "command": "zkz-sandbox.commitMessageCancel",
+        "title": "取消提交"
+      },
+      {
+        "command": "zkz-sandbox.forcePush",
+        "title": "强制上传",
+        "icon": "$(cloud-upload)",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.filterW1Files",
+        "title": "筛选本源文件...",
+        "icon": "$(search)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.browseW1File",
+        "title": "搜索并打开本源文件...",
+        "icon": "$(search)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.openW1BrowseFile",
+        "title": "打开本源文件（选中行显示提交）",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.showFileHistory",
+        "title": "查看本源文件提交历史...",
+        "icon": "$(history)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.stageAll",
+        "title": "暂存全部",
+        "icon": "$(add)",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.unstageAll",
+        "title": "取消全部暂存",
+        "icon": "$(remove)",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.openChangeDiff",
+        "title": "查看差异",
+        "icon": "$(diff)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.openChangeFile",
+        "title": "打开文件",
+        "icon": "$(go-to-file)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.w1RevealInOS",
+        "title": "在资源管理器中显示",
+        "icon": "$(file-symlink-directory)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.w1OpenTerminal",
+        "title": "在集成终端中打开",
+        "icon": "$(terminal)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.w1FindInFolder",
+        "title": "在文件夹中查找...",
+        "icon": "$(search)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.w1CopyPath",
+        "title": "复制路径",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.w1CopyRelativePath",
+        "title": "复制相对路径",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.w1Copy",
+        "title": "复制",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.w1Cut",
+        "title": "剪切",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.w1Paste",
+        "title": "粘贴",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.w1Rename",
+        "title": "重命名...",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.w1Delete",
+        "title": "删除",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.w1NewFile",
+        "title": "新建文件...",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.w1NewFolder",
+        "title": "新建文件夹...",
+        "enablement": "zkzSandbox.gitManage && !zkzSandbox.syncing"
+      },
+      {
+        "command": "zkz-sandbox.w1AddToChat",
+        "title": "Add to Cursor Chat",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.w1AddToNewChat",
+        "title": "Add to New Cursor Chat",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.w1ShowFileHistory",
+        "title": "查看提交历史...",
+        "icon": "$(history)",
+        "enablement": "zkzSandbox.gitManage"
+      },
+      {
+        "command": "zkz-sandbox.toGbAll",
+        "title": "zkz: ToGb (全文核对)",
+        "enablement": "zkzSandbox.sandbox",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "zkz-sandbox.toUtfAll",
+        "title": "zkz: ToUtf (不预过滤)",
+        "enablement": "zkzSandbox.sandbox",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "zkz-sandbox.pickW1File",
+        "title": "搜索并打开本源文件...",
+        "icon": "$(search)",
+        "enablement": "zkzSandbox.gitManage"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "zkz-sandbox.refreshChanges",
+          "when": "view == zkzSandboxChanges && zkzSandbox.gitManage",
+          "group": "navigation@1"
+        },
+        {
+          "command": "zkz-sandbox.commit",
+          "when": "view == zkzSandboxChanges && zkzSandbox.gitManage",
+          "group": "navigation@2"
+        },
+        {
+          "command": "zkz-sandbox.discardAllChanges",
+          "when": "view == zkzSandboxChanges && zkzSandbox.gitManage",
+          "group": "navigation@3"
+        },
+        {
+          "command": "zkz-sandbox.refresh",
+          "when": "view == zkzSandboxBranches && zkzSandbox.gitManage",
+          "group": "navigation@1"
+        },
+        {
+          "command": "zkz-sandbox.commit",
+          "when": "view == zkzSandboxBranches && zkzSandbox.gitManage",
+          "group": "navigation@2"
+        },
+        {
+          "command": "zkz-sandbox.pull",
+          "when": "view == zkzSandboxBranches && zkzSandbox.gitManage",
+          "group": "navigation@3"
+        },
+        {
+          "command": "zkz-sandbox.push",
+          "when": "view == zkzSandboxBranches && zkzSandbox.gitManage",
+          "group": "navigation@4"
+        },
+        {
+          "command": "zkz-sandbox.refreshFiles",
+          "when": "view == zkzSandboxFiles && zkzSandbox.gitManage",
+          "group": "navigation@1"
+        },
+        {
+          "command": "zkz-sandbox.syncMenu",
+          "when": "view == zkzSandboxFiles && zkzSandbox.sandbox",
+          "group": "navigation@2"
+        },
+        {
+          "command": "zkz-sandbox.browseW1File",
+          "when": "view == zkzSandboxFiles && zkzSandbox.gitManage",
+          "group": "navigation@3"
+        },
+        {
+          "command": "zkz-sandbox.viewAsList",
+          "when": "(view == zkzSandboxChanges || view == zkzSandboxFiles) && zkzSandbox.gitManage",
+          "group": "1_view@1",
+          "toggled": "zkzSandbox.viewAsList"
+        },
+        {
+          "command": "zkz-sandbox.viewAsTree",
+          "when": "(view == zkzSandboxChanges || view == zkzSandboxFiles) && zkzSandbox.gitManage",
+          "group": "1_view@2",
+          "toggled": "zkzSandbox.viewAsTree"
+        },
+        {
+          "command": "zkz-sandbox.forcePush",
+          "when": "view == zkzSandboxChanges && zkzSandbox.gitManage",
+          "group": "2_commit@1"
+        },
+        {
+          "command": "zkz-sandbox.undoLastCommit",
+          "when": "view == zkzSandboxChanges && zkzSandbox.gitManage",
+          "group": "2_commit@2"
+        },
+        {
+          "command": "zkz-sandbox.fetch",
+          "when": "view == zkzSandboxBranches && zkzSandbox.gitManage",
+          "group": "2_remote@1"
+        },
+        {
+          "command": "zkz-sandbox.fetchAll",
+          "when": "view == zkzSandboxBranches && zkzSandbox.gitManage",
+          "group": "2_remote@2"
+        },
+        {
+          "command": "zkz-sandbox.checkoutTo",
+          "when": "view == zkzSandboxBranches && zkzSandbox.gitManage",
+          "group": "2_remote@3"
+        },
+        {
+          "command": "zkz-sandbox.branchCreate",
+          "when": "view == zkzSandboxBranches && zkzSandbox.gitManage",
+          "group": "3_branch@1"
+        },
+        {
+          "command": "zkz-sandbox.branchDelete",
+          "when": "view == zkzSandboxBranches && zkzSandbox.gitManage",
+          "group": "3_branch@2"
+        },
+        {
+          "command": "zkz-sandbox.branchRename",
+          "when": "view == zkzSandboxBranches && zkzSandbox.gitManage",
+          "group": "3_branch@3"
+        },
+        {
+          "command": "zkz-sandbox.stash",
+          "when": "(view == zkzSandboxChanges || view == zkzSandboxBranches) && zkzSandbox.gitManage",
+          "group": "4_stash@1"
+        },
+        {
+          "command": "zkz-sandbox.stashPop",
+          "when": "(view == zkzSandboxChanges || view == zkzSandboxBranches) && zkzSandbox.gitManage",
+          "group": "4_stash@2"
+        },
+        {
+          "command": "zkz-sandbox.stashApply",
+          "when": "(view == zkzSandboxChanges || view == zkzSandboxBranches) && zkzSandbox.gitManage",
+          "group": "4_stash@3"
+        },
+        {
+          "command": "zkz-sandbox.stashDrop",
+          "when": "(view == zkzSandboxChanges || view == zkzSandboxBranches) && zkzSandbox.gitManage",
+          "group": "4_stash@4"
+        },
+        {
+          "command": "zkz-sandbox.showFileHistory",
+          "when": "view == zkzSandboxFiles && zkzSandbox.gitManage",
+          "group": "5_files@1"
+        },
+        {
+          "command": "zkz-sandbox.openW1Explorer",
+          "when": "view == zkzSandboxFiles && zkzSandbox.paired",
+          "group": "5_files@2"
+        },
+        {
+          "command": "zkz-sandbox.filterW1Files",
+          "when": "view == zkzSandboxFiles && zkzSandbox.gitManage",
+          "group": "5_files@3"
+        },
+        {
+          "command": "zkz-sandbox.diffSandboxW1",
+          "when": "view == zkzSandboxFiles && zkzSandbox.sandbox",
+          "group": "6_diff@1"
+        },
+        {
+          "command": "zkz-sandbox.diffSandboxW1Batch",
+          "when": "view == zkzSandboxFiles && zkzSandbox.sandbox",
+          "group": "6_diff@2"
+        },
+        {
+          "command": "zkz-sandbox.showDashboard",
+          "when": "view == zkzSandboxFiles && zkzSandbox.paired",
+          "group": "6_diff@3"
+        },
+        {
+          "command": "zkz-sandbox.syncFrom",
+          "when": "view == zkzSandboxFiles && zkzSandbox.sandbox",
+          "group": "7_sync@1"
+        },
+        {
+          "command": "zkz-sandbox.pullSandbox",
+          "when": "view == zkzSandboxFiles && zkzSandbox.sandbox",
+          "group": "7_sync@2"
+        },
+        {
+          "command": "zkz-sandbox.toUtfAll",
+          "when": "view == zkzSandboxFiles && zkzSandbox.sandbox",
+          "group": "7_sync@3"
+        },
+        {
+          "command": "zkz-sandbox.toUtfLibs",
+          "when": "view == zkzSandboxFiles && zkzSandbox.sandbox",
+          "group": "7_sync@4"
+        },
+        {
+          "command": "zkz-sandbox.toGbAll",
+          "when": "view == zkzSandboxFiles && zkzSandbox.sandbox",
+          "group": "7_sync@5"
+        },
+        {
+          "command": "zkz-sandbox.toGbLibs",
+          "when": "view == zkzSandboxFiles && zkzSandbox.sandbox",
+          "group": "7_sync@6"
+        },
+        {
+          "command": "zkz-sandbox.openW1Terminal",
+          "when": "(view == zkzSandboxChanges || view == zkzSandboxBranches || view == zkzSandboxFiles) && zkzSandbox.paired",
+          "group": "8_tool@1"
+        },
+        {
+          "command": "zkz-sandbox.showOutput",
+          "when": "(view == zkzSandboxChanges || view == zkzSandboxBranches || view == zkzSandboxFiles) && zkzSandbox.paired",
+          "group": "8_tool@5"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "zkz-sandbox.checkout",
+          "when": "view == zkzSandboxBranches && (viewItem == branch-local || viewItem == branch-remote) && zkzSandbox.gitManage",
+          "group": "inline@1"
+        },
+        {
+          "command": "zkz-sandbox.checkout",
+          "when": "view == zkzSandboxBranches && (viewItem == branch-local || viewItem == branch-remote) && zkzSandbox.gitManage",
+          "group": "0_action@1"
+        },
+        {
+          "command": "zkz-sandbox.branchDelete",
+          "when": "view == zkzSandboxBranches && viewItem == branch-local && zkzSandbox.gitManage",
+          "group": "0_action@3"
+        },
+        {
+          "command": "zkz-sandbox.openChangeFile",
+          "when": "view == zkzSandboxChanges && viewItem =~ /change/ && zkzSandbox.gitManage",
+          "group": "inline@1"
+        },
+        {
+          "command": "zkz-sandbox.openChangeDiff",
+          "when": "view == zkzSandboxChanges && viewItem =~ /change/ && zkzSandbox.gitManage",
+          "group": "inline@2"
+        },
+        {
+          "command": "zkz-sandbox.openChangeDiff",
+          "when": "view == zkzSandboxChanges && viewItem =~ /change/ && zkzSandbox.gitManage",
+          "group": "0_action@1"
+        },
+        {
+          "command": "zkz-sandbox.openChangeFile",
+          "when": "view == zkzSandboxChanges && viewItem =~ /change/ && zkzSandbox.gitManage",
+          "group": "0_action@2"
+        },
+        {
+          "command": "zkz-sandbox.discardFile",
+          "when": "view == zkzSandboxChanges && viewItem =~ /change/ && zkzSandbox.gitManage",
+          "group": "0_action@3"
+        },
+        {
+          "command": "zkz-sandbox.showCommit",
+          "when": "view == zkzSandboxBranches && viewItem == commit && zkzSandbox.gitManage",
+          "group": "0_action@1"
+        },
+        {
+          "command": "zkz-sandbox.w1NewFile",
+          "when": "view == zkzSandboxFiles && (viewItem == w1-file || viewItem == w1-folder) && zkzSandbox.gitManage",
+          "group": "1_create@1"
+        },
+        {
+          "command": "zkz-sandbox.w1NewFolder",
+          "when": "view == zkzSandboxFiles && (viewItem == w1-file || viewItem == w1-folder) && zkzSandbox.gitManage",
+          "group": "1_create@2"
+        },
+        {
+          "command": "zkz-sandbox.w1RevealInOS",
+          "when": "view == zkzSandboxFiles && (viewItem == w1-file || viewItem == w1-folder) && zkzSandbox.gitManage",
+          "group": "2_nav@1"
+        },
+        {
+          "command": "zkz-sandbox.w1OpenTerminal",
+          "when": "view == zkzSandboxFiles && (viewItem == w1-file || viewItem == w1-folder) && zkzSandbox.gitManage",
+          "group": "2_nav@2"
+        },
+        {
+          "command": "zkz-sandbox.w1AddToChat",
+          "when": "view == zkzSandboxFiles && (viewItem == w1-file || viewItem == w1-folder) && zkzSandbox.gitManage",
+          "group": "3_chat@1"
+        },
+        {
+          "command": "zkz-sandbox.w1AddToNewChat",
+          "when": "view == zkzSandboxFiles && (viewItem == w1-file || viewItem == w1-folder) && zkzSandbox.gitManage",
+          "group": "3_chat@2"
+        },
+        {
+          "command": "zkz-sandbox.w1FindInFolder",
+          "when": "view == zkzSandboxFiles && (viewItem == w1-file || viewItem == w1-folder) && zkzSandbox.gitManage",
+          "group": "4_find@1"
+        },
+        {
+          "command": "zkz-sandbox.w1ShowFileHistory",
+          "when": "view == zkzSandboxFiles && viewItem == w1-file && zkzSandbox.gitManage",
+          "group": "4_find@2"
+        },
+        {
+          "command": "zkz-sandbox.w1Cut",
+          "when": "view == zkzSandboxFiles && (viewItem == w1-file || viewItem == w1-folder) && zkzSandbox.gitManage",
+          "group": "5_edit@1"
+        },
+        {
+          "command": "zkz-sandbox.w1Copy",
+          "when": "view == zkzSandboxFiles && (viewItem == w1-file || viewItem == w1-folder) && zkzSandbox.gitManage",
+          "group": "5_edit@2"
+        },
+        {
+          "command": "zkz-sandbox.w1Paste",
+          "when": "view == zkzSandboxFiles && (viewItem == w1-file || viewItem == w1-folder) && zkzSandbox.w1Clipboard && zkzSandbox.gitManage",
+          "group": "5_edit@3"
+        },
+        {
+          "command": "zkz-sandbox.w1CopyPath",
+          "when": "view == zkzSandboxFiles && (viewItem == w1-file || viewItem == w1-folder) && zkzSandbox.gitManage",
+          "group": "6_path@1"
+        },
+        {
+          "command": "zkz-sandbox.w1CopyRelativePath",
+          "when": "view == zkzSandboxFiles && (viewItem == w1-file || viewItem == w1-folder) && zkzSandbox.gitManage",
+          "group": "6_path@2"
+        },
+        {
+          "command": "zkz-sandbox.w1Rename",
+          "when": "view == zkzSandboxFiles && (viewItem == w1-file || viewItem == w1-folder) && zkzSandbox.gitManage",
+          "group": "7_mod@1"
+        },
+        {
+          "command": "zkz-sandbox.w1Delete",
+          "when": "view == zkzSandboxFiles && (viewItem == w1-file || viewItem == w1-folder) && zkzSandbox.gitManage",
+          "group": "7_mod@2"
+        },
+        {
+          "command": "zkz-sandbox.diffSandboxW1",
+          "when": "view == zkzSandboxFiles && viewItem == w1-file && zkzSandbox.sandbox",
+          "group": "4_find@3"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "zkz-sandbox.diffSandboxW1",
+          "when": "resourceScheme == file && zkzSandbox.sandbox",
+          "group": "navigation@99"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "zkz-sandbox.diffSandboxW1",
+          "when": "resourceScheme == file && zkzSandbox.sandbox && !explorerResourceIsFolder",
+          "group": "zkz@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "zkz-sandbox.diffSandboxW1",
+          "when": "resourceScheme == file && zkzSandbox.sandbox",
+          "group": "zkz@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "zkz-sandbox.commitMessageAccept",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "zkzSandbox.commitMsgOpen"
+      },
+      {
+        "command": "zkz-sandbox.commitMessageCancel",
+        "key": "escape",
+        "when": "zkzSandbox.commitMsgOpen && !suggestWidgetVisible && !findWidgetVisible"
+      },
+      {
+        "command": "zkz-sandbox.diffSandboxW1",
+        "key": "ctrl+alt+d",
+        "mac": "cmd+alt+d",
+        "when": "zkzSandbox.sandbox && resourceScheme == file"
+      },
+      {
+        "command": "zkz-sandbox.diffSandboxW1Batch",
+        "key": "ctrl+alt+shift+d",
+        "mac": "cmd+alt+shift+d",
+        "when": "zkzSandbox.sandbox"
+      }
+    ],
+    "configurationDefaults": {
+      "workbench.view.alwaysShowHeaderActions": true
+    }
+  },
+  "dependencies": {
+    "iconv-lite": "^0.6.3"
+  }
+}

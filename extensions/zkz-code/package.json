@@ -1,0 +1,158 @@
+{
+  "name": "zkz-code",
+  "displayName": "zkz Code",
+  "description": "Independent yt_version macros, clangd index, inactive #if folding, and FFFD checks.",
+  "version": "1.0.0",
+  "publisher": "zkz",
+  "icon": "media/zkz-code.png",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onLanguage:c",
+    "onLanguage:cpp"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "zkz-code.showMacros",
+        "title": "zkz Code: Show yt_version Macros"
+      },
+      {
+        "command": "zkz-code.foldInactiveIfdef",
+        "title": "zkz Code: Fold Inactive #if"
+      },
+      {
+        "command": "zkz-code.unfoldInactiveIfdef",
+        "title": "zkz Code: Unfold Inactive #if"
+      },
+      {
+        "command": "zkz-code.refreshIfdefFolds",
+        "title": "zkz Code: Refresh #if Folds"
+      },
+      {
+        "command": "zkz-code.refreshCompileCommands",
+        "title": "zkz Code: Refresh compile_commands"
+      },
+      {
+        "command": "zkz-code.reindexClangd",
+        "title": "zkz Code: Reindex clangd"
+      },
+      {
+        "command": "zkz-code.invalidateMacroImpactIndex",
+        "title": "zkz Code: Refresh Macro Impact Index"
+      },
+      {
+        "command": "zkz-code.checkFffd",
+        "title": "zkz Code: Check FFFD"
+      },
+      {
+        "command": "zkz-code.refreshStatus",
+        "title": "zkz Code: Refresh Macro Status"
+      },
+      {
+        "command": "zkz-code.beginYtMacroCheckoutGuard",
+        "title": "zkz Code: Freeze Macro Baseline"
+      },
+      {
+        "command": "zkz-code.syncYtVersionAfterCheckout",
+        "title": "zkz Code: Sync Macros After Checkout"
+      }
+    ],
+    "submenus": [
+      {
+        "id": "zkz-code.editorMenu",
+        "label": "zkz Code",
+        "icon": "$(symbol-misc)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "zkz-code.beginYtMacroCheckoutGuard",
+          "when": "false"
+        },
+        {
+          "command": "zkz-code.syncYtVersionAfterCheckout",
+          "when": "false"
+        }
+      ],
+      "editor/title": [
+        {
+          "submenu": "zkz-code.editorMenu",
+          "group": "navigation@90",
+          "when": "zkzCode.enabled && (resourceLangId == c || resourceLangId == cpp)"
+        }
+      ],
+      "editor/context": [
+        {
+          "submenu": "zkz-code.editorMenu",
+          "group": "zkz@1",
+          "when": "zkzCode.enabled && (resourceLangId == c || resourceLangId == cpp)"
+        }
+      ],
+      "zkz-code.editorMenu": [
+        {
+          "command": "zkz-code.showMacros",
+          "group": "1_macro@1"
+        },
+        {
+          "command": "zkz-code.foldInactiveIfdef",
+          "group": "2_fold@1"
+        },
+        {
+          "command": "zkz-code.unfoldInactiveIfdef",
+          "group": "2_fold@2"
+        },
+        {
+          "command": "zkz-code.refreshIfdefFolds",
+          "group": "2_fold@3"
+        },
+        {
+          "command": "zkz-code.refreshCompileCommands",
+          "group": "3_idx@1"
+        },
+        {
+          "command": "zkz-code.invalidateMacroImpactIndex",
+          "group": "3_idx@2"
+        },
+        {
+          "command": "zkz-code.reindexClangd",
+          "group": "3_idx@3"
+        },
+        {
+          "command": "zkz-code.checkFffd",
+          "group": "4_enc@1"
+        },
+        {
+          "command": "zkz-code.refreshStatus",
+          "group": "5_status@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "zkz Code",
+      "properties": {
+        "zkzCode.ifdefFold.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-fold inactive #if/#elif/#else in source files (.c/.cpp), not headers."
+        },
+        "zkzCode.ifdefFold.minLines": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "description": "Minimum lines (including directive) required to fold a branch."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "iconv-lite": "^0.6.3"
+  }
+}
