@@ -1,0 +1,78 @@
+{
+  "name": "zkz-native",
+  "displayName": "zkz Native",
+  "description": "Open the true-source tree as UTF-8 via git clean/smudge. Keeps repo blobs in original GBK/ASCII/UTF-8.",
+  "version": "0.0.33",
+  "publisher": "zkz",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "zkz-native.enable",
+        "title": "zkz Native: Enable filter"
+      },
+      {
+        "command": "zkz-native.disable",
+        "title": "zkz Native: Disable filter"
+      },
+      {
+        "command": "zkz-native.refreshTable",
+        "title": "zkz Native: Refresh encoding table"
+      },
+      {
+        "command": "zkz-native.checkRoundtrip",
+        "title": "zkz Native: Check cp936 roundtrip"
+      },
+      {
+        "command": "zkz-native.status",
+        "title": "zkz Native: Status"
+      },
+      {
+        "command": "zkz-native.syncKeilTree",
+        "title": "zkz Native: Sync Keil tree"
+      },
+      {
+        "command": "zkz-native.copyDebugAxf",
+        "title": "zkz Native: Copy debug axf"
+      },
+      {
+        "command": "zkz-native.saveConfigOverlay",
+        "title": "zkz Native: Save local config as authoritative"
+      },
+      {
+        "command": "zkz-native.restoreConfigOverlay",
+        "title": "zkz Native: Restore local config"
+      }
+    ],
+    "configuration": {
+      "title": "zkz Native",
+      "properties": {
+        "zkz-native.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow zkz-native to install and verify local git filters."
+        },
+        "zkz-native.glob": {
+          "type": "string",
+          "default": "*.c,*.h",
+          "description": "Source globs handled by the encoding table (informational)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node test/run.js"
+  },
+  "dependencies": {
+    "iconv-lite": "^0.6.3"
+  }
+}
