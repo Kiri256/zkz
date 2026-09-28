@@ -52,7 +52,7 @@ function create(context, opts) {
       if (st.roundtripFails && st.roundtripFails.length) {
         tips.push('往返失败: ' + st.roundtripFails.slice(0, 8).join(', '));
       }
-      if (st.tableDrift) tips.push('编码表落后于 HEAD，将自动刷新或请执行 refreshTable');
+      if (st.tableDrift) tips.push('编码表对应的分支已变，将自动刷新或请执行 refreshTable');
       const libItems = st.libWarnings || [];
       if (libItems.length) {
         tips.push('库编码告警: ' + libItems.slice(0, 8).map((it) => it.rel).join(', '));
@@ -71,7 +71,7 @@ function create(context, opts) {
         if (libItems.length && !st.libWarningsNotified) {
           markLibWarningsNotified(repo);
           void vscode.window.showWarningMessage(
-            'zkz-native: ' + libItems.length + ' 个库文件编码疑似漂移或损坏。库不过滤，不会自动改回。见 .zkz/lib-encoding-warnings.json'
+            'zkz-native: ' + libItems.length + ' 个库文件编码疑似漂移或损坏。库不过滤，不会自动改回。见 .zkz/run/lib-encoding-warnings.json'
           );
         }
       } else {

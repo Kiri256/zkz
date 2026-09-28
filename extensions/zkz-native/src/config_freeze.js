@@ -17,7 +17,7 @@ const DEFAULT_PATHS = {
 
 const ALWAYS_FORBID = [
   '.zkz/config_paths.json',
-  '.zkz/.workspace_source_encodings.json'
+  '.zkz/run/.workspace_source_encodings.json'
 ];
 
 function uniqRels(lists) {

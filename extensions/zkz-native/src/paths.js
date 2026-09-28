@@ -17,8 +17,93 @@ function ensureZkz(repoRoot) {
   return dir;
 }
 
+function runDir(repoRoot) {
+  return path.join(zkzDir(repoRoot), 'run');
+}
+
+const RUN_FILE_NAMES = [
+  '.workspace_source_encodings.json',
+  'keil-native-stamp.json',
+  'skip-worktree-stamp.json',
+  'roundtrip-failures.json',
+  'filter-fail.json',
+  'handshake-reject.json',
+  'lib-encoding-warnings.json',
+  'zkz-native.log',
+  'native-status.json',
+  'compile-commands-stamp.json',
+  'macro-table.json'
+];
+
+const relocatedRoots = new Set();
+
+/** 把旧的 .zkz 根上运行时文件挪到 .zkz/run/。每个进程对每个仓库只做一次。 */
+function relocateRunFiles(repoRoot) {
+  if (!repoRoot) return;
+  const key = path.resolve(repoRoot);
+  if (relocatedRoots.has(key)) return;
+  const root = zkzDir(repoRoot);
+  const dest = runDir(repoRoot);
+  try { fs.mkdirSync(dest, { recursive: true }); } catch (_) { return; }
+  let pending = false;
+  for (let i = 0; i < RUN_FILE_NAMES.length; i++) {
+    const name = RUN_FILE_NAMES[i];
+    const from = path.join(root, name);
+    const to = path.join(dest, name);
+    try {
+      if (!fs.existsSync(from) || fs.existsSync(to)) continue;
+      fs.renameSync(from, to);
+    } catch (_) { pending = true; }
+  }
+  const oldLocks = path.join(root, 'locks');
+  const newLocks = path.join(dest, 'locks');
+  try {
+    if (fs.existsSync(oldLocks) && !fs.existsSync(newLocks)) fs.renameSync(oldLocks, newLocks);
+  } catch (_) { pending = true; }
+  if (!pending) {
+    relocatedRoots.add(key);
+    ensureRunExcluded(repoRoot);
+  }
+}
+
+function gitExcludeFile(repoRoot) {
+  const dot = path.join(repoRoot, '.git');
+  let gitDir = '';
+  try {
+    const st = fs.statSync(dot);
+    if (st.isDirectory()) gitDir = dot;
+    else {
+      const text = fs.readFileSync(dot, 'utf8');
+      const m = text.match(/^gitdir:\s*(.+)$/m);
+      if (m) gitDir = path.resolve(repoRoot, m[1].trim());
+    }
+  } catch (_) {
+    return '';
+  }
+  return gitDir ? path.join(gitDir, 'info', 'exclude') : '';
+}
+
+function ensureRunExcluded(repoRoot) {
+  const file = gitExcludeFile(repoRoot);
+  if (!file) return;
+  const line = '.zkz/run/';
+  let cur = '';
+  try { if (fs.existsSync(file)) cur = fs.readFileSync(file, 'utf8'); } catch (_) { return; }
+  if (cur.split(/\r?\n/).some((l) => l.trim() === line || l.trim() === '.zkz/run')) return;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const prefix = cur && !/\n$/.test(cur) ? cur + '\n' : cur;
+    fs.writeFileSync(file, prefix + line + '\n', 'utf8');
+  } catch (_) { /* ignore */ }
+}
+
+function runFile(repoRoot, name) {
+  relocateRunFiles(repoRoot);
+  return path.join(runDir(repoRoot), name);
+}
+
 function tablePath(repoRoot) {
-  return path.join(zkzDir(repoRoot), '.workspace_source_encodings.json');
+  return runFile(repoRoot, '.workspace_source_encodings.json');
 }
 
 function configPathsFile(repoRoot) {
@@ -30,11 +115,11 @@ function keilNativeRoot(repoRoot) {
 }
 
 function keilStampPath(repoRoot) {
-  return path.join(zkzDir(repoRoot), 'keil-native-stamp.json');
+  return runFile(repoRoot, 'keil-native-stamp.json');
 }
 
 function skipWorktreeStampPath(repoRoot) {
-  return path.join(zkzDir(repoRoot), 'skip-worktree-stamp.json');
+  return runFile(repoRoot, 'skip-worktree-stamp.json');
 }
 
 function configOverlayRoot(repoRoot) {
@@ -247,23 +332,27 @@ function atomicWriteJson(file, obj) {
 }
 
 function roundtripFailPath(repoRoot) {
-  return path.join(zkzDir(repoRoot), 'roundtrip-failures.json');
+  return runFile(repoRoot, 'roundtrip-failures.json');
 }
 
 function filterFailPath(repoRoot) {
-  return path.join(zkzDir(repoRoot), 'filter-fail.json');
+  return runFile(repoRoot, 'filter-fail.json');
 }
 
 function handshakeRejectPath(repoRoot) {
-  return path.join(zkzDir(repoRoot), 'handshake-reject.json');
+  return runFile(repoRoot, 'handshake-reject.json');
 }
 
 function libEncodingWarnPath(repoRoot) {
-  return path.join(zkzDir(repoRoot), 'lib-encoding-warnings.json');
+  return runFile(repoRoot, 'lib-encoding-warnings.json');
 }
 
 function nativeLogFile(repoRoot) {
-  return path.join(zkzDir(repoRoot), 'zkz-native.log');
+  return runFile(repoRoot, 'zkz-native.log');
+}
+
+function nativeStatusPath(repoRoot) {
+  return runFile(repoRoot, 'native-status.json');
 }
 
 function appendLog(repoRoot, msg) {
@@ -295,6 +384,8 @@ function formatLocalNow(d) {
 module.exports = {
   slashRel,
   zkzDir,
+  runDir,
+  relocateRunFiles,
   ensureZkz,
   formatLocalNow,
   tablePath,
@@ -320,5 +411,6 @@ module.exports = {
   handshakeRejectPath,
   libEncodingWarnPath,
   nativeLogFile,
+  nativeStatusPath,
   appendLog
 };

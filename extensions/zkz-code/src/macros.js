@@ -25,6 +25,13 @@ function loadMacroKeys() {
 
 const MACRO_KEYS = loadMacroKeys();
 
+/** 索引快照只在还没有时建立。已有快照保持不变，保存不能把它推进。 */
+function retainIndexSnapshot(indexed, seen, next) {
+  if (indexed && Object.keys(indexed).length) return indexed;
+  if (seen && Object.keys(seen).length) return seen;
+  return next || {};
+}
+
 function isTrackedMacro(name) {
   return MACRO_KEYS.includes(name)
     || name.startsWith('MALL_')
@@ -343,6 +350,92 @@ let gTableCache = emptyMacroTable();
 function invalidateMacroTable() {
   gTableCache = emptyMacroTable();
   gClangdCache = { key: '', macros: {} };
+  gPublishedKey = '';
+}
+
+function macroTableFile(root) {
+  return path.join(root, '.zkz', 'run', 'macro-table.json');
+}
+
+function relocateMacroTable(root) {
+  const from = path.join(root, '.zkz', 'macro-table.json');
+  const to = macroTableFile(root);
+  try {
+    if (!fs.existsSync(from) || fs.existsSync(to)) return;
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.renameSync(from, to);
+  } catch (_) { /* ignore */ }
+}
+
+function gitExcludeFile(root) {
+  const dot = path.join(root, '.git');
+  let gitDir = '';
+  try {
+    const st = fs.statSync(dot);
+    if (st.isDirectory()) gitDir = dot;
+    else {
+      const text = fs.readFileSync(dot, 'utf8');
+      const m = text.match(/^gitdir:\s*(.+)$/m);
+      if (m) gitDir = path.resolve(root, m[1].trim());
+    }
+  } catch (_) {
+    return '';
+  }
+  return gitDir ? path.join(gitDir, 'info', 'exclude') : '';
+}
+
+/** 本地 exclude 里补一行，避免宏表出现在更改列表。不写进 native 的过滤器标记块。 */
+function ensureMacroTableExcluded(root) {
+  const file = gitExcludeFile(root);
+  if (!file) return;
+  const line = '.zkz/run/macro-table.json';
+  let cur = '';
+  try { if (fs.existsSync(file)) cur = fs.readFileSync(file, 'utf8'); } catch (_) { return; }
+  if (cur.split(/\r?\n/).some((l) => l.trim() === line)) return;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const prefix = cur && !/\n$/.test(cur) ? cur + '\n' : cur;
+    fs.writeFileSync(file, prefix + line + '\n', 'utf8');
+  } catch (_) { /* ignore */ }
+}
+
+let gPublishedKey = '';
+
+function removeMacroTable(root) {
+  if (!root) return;
+  const paths = [
+    macroTableFile(root),
+    path.join(root, '.zkz', 'macro-table.json')
+  ];
+  for (let i = 0; i < paths.length; i++) {
+    try { if (fs.existsSync(paths[i])) fs.unlinkSync(paths[i]); } catch (_) { /* ignore */ }
+  }
+  gPublishedKey = '';
+}
+
+function publishMacroTable(root, table) {
+  if (!root || !table || !table.ready) return '';
+  relocateMacroTable(root);
+  const file = macroTableFile(root);
+  const names = Object.keys(table.macros).sort();
+  const macros = {};
+  for (let i = 0; i < names.length; i++) macros[names[i]] = table.macros[names[i]];
+  const body = JSON.stringify({
+    file: table.filePath || '',
+    ready: true,
+    count: names.length,
+    macros: macros
+  }, null, 2) + '\n';
+  try {
+    if (gPublishedKey === table.key && fs.existsSync(file)) return file;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    let cur = '';
+    try { if (fs.existsSync(file)) cur = fs.readFileSync(file, 'utf8'); } catch (_) { cur = ''; }
+    if (cur !== body) fs.writeFileSync(file, body, 'utf8');
+    ensureMacroTableExcluded(root);
+    gPublishedKey = table.key;
+  } catch (_) { /* 写不出不影响折叠 */ }
+  return file;
 }
 
 function getMacroTable() {
@@ -357,7 +450,11 @@ function loadMacroTable(opts) {
   opts = opts || {};
   const root = opts.workspaceRoot || inferWorkspaceRoot(opts.filePath || '');
   const ver = opts.filePath || (root ? findYtVersion(root) : null);
-  if (!ver && opts.text == null) return emptyMacroTable();
+  if (!ver && opts.text == null) {
+    removeMacroTable(root);
+    gTableCache = emptyMacroTable();
+    return gTableCache;
+  }
   const clangdKey = clangdCacheKey(root);
   let text = null;
   let textKey;
@@ -371,7 +468,10 @@ function loadMacroTable(opts) {
     textKey = 'none';
   }
   const key = (ver || '') + '|' + textKey + '|' + clangdKey;
-  if (gTableCache.key === key && gTableCache.ready) return gTableCache;
+  if (gTableCache.key === key && gTableCache.ready) {
+    publishMacroTable(root, gTableCache);
+    return gTableCache;
+  }
   if (text == null) text = ver ? getYtVersionText(ver) : '';
   const clangd = loadClangdLayer(root);
   const parsed = parseFullMacroTable(text, clangd.macros);
@@ -383,6 +483,7 @@ function loadMacroTable(opts) {
     ready,
     filePath: ver || ''
   };
+  publishMacroTable(root, gTableCache);
   return gTableCache;
 }
 
@@ -498,11 +599,14 @@ module.exports = {
   loadMacroTable,
   invalidateMacroTable,
   getMacroTable,
+  macroTableFile,
+  publishMacroTable,
   isMacroEnvReady,
   evalPpExpr,
   getYtVersionText,
   revealMacroInYtVersion,
   isTrackedMacro,
+  retainIndexSnapshot,
   isMacroKeyShown,
   machineLabel,
   machineFingerprint,

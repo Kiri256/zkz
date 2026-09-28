@@ -2,7 +2,7 @@
   "name": "zkz-keil",
   "displayName": "zkz Keil",
   "description": "Keil UV4 build, J-Link flash, and Cortex-Debug prepare. True-source + zkz-native builds the keil-native tree.",
-  "version": "1.0.15",
+  "version": "1.0.17",
   "publisher": "zkz",
   "icon": "media/zkz-keil.png",
   "engines": {

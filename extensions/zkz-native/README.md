@@ -15,7 +15,7 @@
 - **smudge（检出）**：blob → UTF-8
 - **clean（add/commit）**：UTF-8 → 原编码
 
-编码表在本机 `.zkz/.workspace_source_encodings.json`（不进仓库），按路径决定每个文件怎么转。新文件默认按 UTF-8/ASCII 入库，不强转 GBK。
+编码表在本机 `.zkz/run/.workspace_source_encodings.json`（不进仓库），按路径决定每个文件怎么转。新文件默认按 UTF-8/ASCII 入库，不强转 GBK。
 
 ## 命令
 
@@ -41,9 +41,9 @@ git hook 只保留 `pre-commit` / `pre-push`（挡坏提交/推送）。过滤�
 
 过滤器异常时运行 **zkz-native.disable** 即可卸掉（只改 `.git/config` 与 attributes，不依赖 filter 进程）。
 
-往返失败会记入 `.zkz/roundtrip-failures.json` 并在状态栏标出。`pre-commit` / `pre-push` 会拦编码不对的 blob。握手被拒时写 `.zkz/handshake-reject.json`（含首包 hex）。
+往返失败会记入 `.zkz/run/roundtrip-failures.json` 并在状态栏标出。`pre-commit` / `pre-push` 会拦编码不对的 blob。握手被拒时写 `.zkz/run/handshake-reject.json`（含首包 hex）。
 
-`ZKZ_NATIVE_LOG=1` 时写 `.zkz/zkz-native.log`。
+`ZKZ_NATIVE_LOG=1` 时写 `.zkz/run/zkz-native.log`。
 
 ## 编烧 / 调试
 
@@ -62,4 +62,4 @@ git hook 只保留 `pre-commit` / `pre-push`（挡坏提交/推送）。过滤�
 - 非 `.c/.h`（如 `.uvproj`）保持原字节，工具可能乱码。
 - VS Code 内置内联 diff 左侧对 GBK blob 仍可能乱码；CLI `git diff` 有 textconv。
 - 重命名 GBK 文件后必须先刷新编码表，否则会按新文件写成 UTF-8。
-- 库目录不过滤，编码没有 clean 兜底；编烧树里仍是 junction。改过的库 `.c/.h` 会在同步编烧树、提交和推送时巡检：HEAD 为 GBK 而当前变成 UTF-8，或出现 U+FFFD，会写入 `.zkz/lib-encoding-warnings.json` 并告警，不改文件、不拦编译。要提交时拦住，设 `git config --local zkz.libEncodingStrict true`。
+- 库目录不过滤，编码没有 clean 兜底；编烧树里仍是 junction。改过的库 `.c/.h` 会在同步编烧树、提交和推送时巡检：HEAD 为 GBK 而当前变成 UTF-8，或出现 U+FFFD，会写入 `.zkz/run/lib-encoding-warnings.json` 并告警，不改文件、不拦编译。要提交时拦住，设 `git config --local zkz.libEncodingStrict true`。

@@ -18,7 +18,8 @@ const {
   machineFingerprint,
   formatMacroLines,
   listedMacroNames,
-  formatMacroBadge
+  formatMacroBadge,
+  retainIndexSnapshot
 } = require('./macros');
 const { diffMacroValues, invalidateIndexForMacroChanges } = require('./macro_impact');
 const ifdefFold = require('./ifdef_fold');
@@ -27,8 +28,10 @@ const statusBar = require('./status_bar');
 
 const PREFIX = 'zkz-code';
 
-/** @type {Record<string, string>} */
+/** @type {Record<string, string>} 上次看到的宏表。保存和刷徽章会推进。 */
 let gLastMacros = {};
+/** @type {Record<string, string>} 上次成功刷过 clangd 索引时的宏表。 */
+let gIndexedMacros = {};
 let gLastMachineFp = '';
 let gYtPromptKey = '';
 let gYtPromptAt = 0;
@@ -107,7 +110,7 @@ function shouldTrackCc(root) {
   if (fs.existsSync(path.join(root, 'compile_commands.json'))) return true;
   try {
     const layout = resolveKeilLayout(root);
-    return !!(layout && (fs.existsSync(layout.ytswarm) || fs.existsSync(layout.projectFile)));
+    return !!(layout && layout.projectFile && fs.existsSync(layout.projectFile));
   } catch (_) {
     return false;
   }
@@ -191,6 +194,25 @@ async function onHeadChanged(payload) {
   void autoRefreshCc(root, to, { notify: true });
 }
 
+function adoptSeenMacros(macros) {
+  gIndexedMacros = retainIndexSnapshot(gIndexedMacros, gLastMacros, macros);
+  gLastMacros = macros;
+  gLastMachineFp = machineFingerprint(macros);
+}
+
+function commitIndexSnapshot(macros) {
+  gIndexedMacros = macros || {};
+  gLastMacros = macros || gLastMacros;
+  gLastMachineFp = machineFingerprint(gLastMacros);
+}
+
+function changedSinceIndex(macros) {
+  if (Object.keys(gIndexedMacros).length) {
+    return diffMacroValues(gIndexedMacros, macros).filter((k) => isTrackedMacro(k));
+  }
+  return Object.keys(macros).filter((k) => isTrackedMacro(k) && isMacroKeyShown(k, macros[k]));
+}
+
 function alignYtMacroBaseline(macros) {
   if (gMacroBaselineFrozen) return false;
   if (!macros || typeof macros !== 'object') return false;
@@ -199,8 +221,7 @@ function alignYtMacroBaseline(macros) {
     ? diffMacroValues(gLastMacros, macros)
     : Object.keys(macros);
   if (!Object.keys(gLastMacros).length || changed.length || fp !== gLastMachineFp) {
-    gLastMacros = macros;
-    gLastMachineFp = fp;
+    adoptSeenMacros(macros);
     return true;
   }
   return false;
@@ -283,8 +304,7 @@ async function syncYtMacros(opts) {
     return { changed: changed, updated: false, frozen: true };
   }
   const prevFp = gLastMachineFp;
-  gLastMacros = macros;
-  gLastMachineFp = fp;
+  adoptSeenMacros(macros);
 
   if (changedAll.length) {
     try { ifdefFold.onMacrosChanged(); } catch (_) { /* ignore */ }
@@ -316,6 +336,7 @@ async function syncYtMacros(opts) {
   );
   if (choice === '\u5c40\u90e8\u5237\u65b0\u7d22\u5f15') {
     const r = await invalidateIndexForMacroChanges(clangdRoot(), changed);
+    commitIndexSnapshot(macros);
     const searchN = (r.searchMacros && r.searchMacros.length) ? r.searchMacros.length : changed.length;
     void showInfoAuto(
       '\u5df2\u5220 ' + r.removed + ' \u4e2a .idx\uff08\u79cd\u5b50 ' + changed.length +
@@ -324,6 +345,7 @@ async function syncYtMacros(opts) {
     );
   } else if (choice === '\u5168\u91cf\u91cd\u5efa\u7d22\u5f15') {
     await reindexClangd();
+    commitIndexSnapshot(macros);
   }
   return { changed: changed, updated: true };
 }
@@ -360,6 +382,7 @@ async function refreshMacroBadge() {
   if (!bar || !bar.alive()) return;
   const ver = findWorkspaceYtVersion();
   if (!ver) {
+    try { loadMacroTable({ workspaceRoot: workspaceRoot() || sourceRoot() }); } catch (_) { /* ignore */ }
     bar.setMacro('$(symbol-misc) yt_version?', 'yt_version.h not found');
     return;
   }
@@ -457,16 +480,13 @@ async function invalidateMacroImpact() {
   const ver = findWorkspaceYtVersion();
   if (!ver) throw new Error('yt_version.h not found');
   const macros = loadMacroTable({ filePath: ver }).macros;
-  const changed = Object.keys(gLastMacros).length
-    ? diffMacroValues(gLastMacros, macros).filter((k) => isTrackedMacro(k))
-    : Object.keys(macros).filter((k) => isTrackedMacro(k) && isMacroKeyShown(k, macros[k]));
+  const changed = changedSinceIndex(macros);
   if (!changed.length) {
-    void showInfoAuto('\u65e0\u5b8f\u53d8\u5316\u53ef\u7528\uff08\u76f8\u5bf9\u4e0a\u6b21\u5feb\u7167\uff09');
+    void showInfoAuto('\u65e0\u5b8f\u53d8\u5316\u53ef\u7528\uff08\u76f8\u5bf9\u4e0a\u6b21\u5237\u8fc7\u7684\u7d22\u5f15\uff09');
     return;
   }
   const r = await invalidateIndexForMacroChanges(clangdRoot(), changed);
-  gLastMacros = macros;
-  gLastMachineFp = machineFingerprint(macros);
+  commitIndexSnapshot(macros);
   const searchN = (r.searchMacros && r.searchMacros.length) ? r.searchMacros.length : changed.length;
   void showInfoAuto(
     '\u5b8f ' + changed.length + '\u9879(\u68c0\u7d22 ' + searchN + ') \u2192 \u6587\u4ef6 ' + r.files.length +

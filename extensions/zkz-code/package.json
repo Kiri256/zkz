@@ -2,7 +2,7 @@
   "name": "zkz-code",
   "displayName": "zkz Code",
   "description": "Independent yt_version macros, clangd index, inactive #if folding, and FFFD checks.",
-  "version": "1.0.31",
+  "version": "1.0.36",
   "publisher": "zkz",
   "icon": "media/zkz-code.png",
   "engines": {

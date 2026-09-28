@@ -228,6 +228,7 @@ function writeJLinkFlashSettingsIni(dir) {
     'AllowCaching = 0',
     'EnableFlashDL = 2',
     'Override = 0',
+    'ShowInfoWin = 0',
     'Device="UNSPECIFIED"',
     '[CPU]',
     'OverrideMemMap = 0',
@@ -295,11 +296,16 @@ async function invokeJLinkHexFlash(opts) {
   if (tool.flavor === 'h750') assertH750HexQspiOnly(hexFull, log, tool);
   const cmdWork = writeJLinkFlashSettingsIni(path.join(opts.workDir, '.zkz', 'jlink_flash'));
   const scriptPath = path.join(cmdWork, 'flash.jlink');
-  const lines = [
+  const lines = [];
+  if (!tool.noGui) {
+    lines.push('exec SuppressControlPanel');
+    lines.push('exec DisableInfoWinFlashDL');
+  }
+  lines.push(
     'device ' + tool.device,
     'si 1',
     'speed ' + tool.speedKHz
-  ];
+  );
   if (tool.noGui) lines.push('connect');
   lines.push('r', 'h', 'loadfile "' + hexFull + '"');
   if (tool.noGui) lines.push('RSetType 2', 'rx 100');

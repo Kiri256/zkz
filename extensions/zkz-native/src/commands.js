@@ -154,7 +154,7 @@ function cmdSyncKeilTree() {
     const n = (r && r.libWarnings && r.libWarnings.length) || 0;
     if (n) {
       void vscode.window.showWarningMessage(
-        'zkz-native: ' + n + ' 个库文件编码疑似漂移或损坏。库不过滤，不会自动改回。见 .zkz/lib-encoding-warnings.json'
+        'zkz-native: ' + n + ' 个库文件编码疑似漂移或损坏。库不过滤，不会自动改回。见 .zkz/run/lib-encoding-warnings.json'
       );
       try {
         const { markLibWarningsNotified } = require('./lib_encoding');

@@ -494,6 +494,36 @@ test('readHeadName ignores same-branch commit and undo', () => {
   }
 });
 
+test('tableDrift ignores same-branch commit and flags a branch switch', () => {
+  const os = require('os');
+  const path = require('path');
+  const fs = require('fs');
+  const { tableDrift } = require('../src/bootstrap');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-drift-'));
+  const git = path.join(root, '.git');
+  const oid = '0123456789abcdef0123456789abcdef01234567';
+  const next = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const table = path.join(root, '.zkz', 'run', '.workspace_source_encodings.json');
+  try {
+    fs.mkdirSync(path.join(git, 'refs', 'heads'), { recursive: true });
+    fs.writeFileSync(path.join(git, 'refs', 'heads', 'main'), next + '\n', 'utf8');
+    fs.writeFileSync(path.join(git, 'HEAD'), 'ref: refs/heads/main\n', 'utf8');
+    fs.mkdirSync(path.dirname(table), { recursive: true });
+    fs.writeFileSync(table, JSON.stringify({
+      version: 1,
+      head: oid,
+      files: { 'a.c': 'Utf8' }
+    }), 'utf8');
+    assert.strictEqual(tableDrift(root), false);
+    const stamped = JSON.parse(fs.readFileSync(table, 'utf8'));
+    assert.strictEqual(stamped.ref, 'refs/heads/main');
+    fs.writeFileSync(path.join(git, 'HEAD'), 'ref: refs/heads/dev\n', 'utf8');
+    assert.strictEqual(tableDrift(root), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('lib encoding flags gbk-to-utf8 and fffd, not ascii edits', () => {
   const os = require('os');
   const path = require('path');
@@ -728,6 +758,23 @@ test('lib tops read libraryDirNames from workspace_lists.json', () => {
   assert.deepStrictEqual(libTopNames(dir), ['Libraries']);
 });
 
+test('library attributes cancel -text so autocrlf still applies', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-attr-'));
+  fs.mkdirSync(path.join(dir, '.zkz'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'Libraries'));
+  fs.writeFileSync(path.join(dir, '.zkz', 'workspace_lists.json'), JSON.stringify({
+    libraryDirNames: ['Libraries']
+  }), 'utf8');
+  const { attributesBody } = require('../src/git_config');
+  const body = attributesBody(dir);
+  assert.ok(body.indexOf('*.c filter=zkznative diff=zkznative -text') >= 0);
+  assert.ok(body.indexOf('Libraries/** -filter -diff !text') >= 0);
+  assert.ok(body.indexOf('Libraries/** -filter -diff\n') < 0);
+});
+
 test('keil-native symlink is not written through', () => {
   const os = require('os');
   const fs = require('fs');
@@ -765,6 +812,139 @@ test('keil-native drops files the source no longer has', () => {
   assert.strictEqual(n, 1);
   assert.strictEqual(fs.existsSync(path.join(kn, 'core', 'keep.h')), true);
   assert.strictEqual(fs.existsSync(path.join(kn, 'core', 'old', 'gone.h')), false);
+});
+
+test('resmudge rewrites stat-clean GBK worktree to UTF-8', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { encodeCp936, detectKind } = require('../src/encoding');
+  const { resmudgeStale } = require('../src/bootstrap');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-smudge-'));
+  const git = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  git(['init', '-q']);
+  git(['config', 'user.email', 'a@b.c']);
+  git(['config', 'user.name', 't']);
+  fs.writeFileSync(path.join(dir, 'a.c'), encodeCp936('int x; // \u4e2d\u6587\n'));
+  git(['add', 'a.c']);
+  git(['commit', '-q', '-m', 'init']);
+  fs.mkdirSync(path.join(dir, '.zkz', 'run'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, '.zkz', 'run', '.workspace_source_encodings.json'),
+    JSON.stringify({ files: { 'a.c': 'Gbk' } }),
+    'utf8'
+  );
+  const filterJs = path.join(__dirname, '..', 'src', 'filter_process.js');
+  git(['config', 'filter.zkznative.process', '"' + process.execPath + '" "' + filterJs + '"']);
+  git(['config', 'filter.zkznative.required', 'true']);
+  fs.mkdirSync(path.join(dir, '.git', 'info'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.git', 'info', 'attributes'), '*.c filter=zkznative -text\n', 'utf8');
+  assert.strictEqual(resmudgeStale(dir), 1);
+  const now = fs.readFileSync(path.join(dir, 'a.c'));
+  assert.strictEqual(detectKind(now), 'Utf8');
+  assert.ok(now.toString('utf8').indexOf('\u4e2d\u6587') >= 0);
+  const st = git(['status', '--porcelain', '--', 'a.c']);
+  assert.strictEqual(String(st.stdout || '').trim(), '');
+  const cached = git(['diff', '--cached', '--numstat', '--', 'a.c']);
+  assert.strictEqual(String(cached.stdout || '').trim(), '');
+});
+
+test('worktreeBytes inserts CRLF only when autocrlf and blob has no CR', () => {
+  const { worktreeBytes } = require('../src/bootstrap');
+  const lf = Buffer.from('a\nb\n');
+  const crlf = worktreeBytes(lf, true);
+  assert.strictEqual(crlf.toString('latin1'), 'a\r\nb\r\n');
+  assert.strictEqual(worktreeBytes(lf, false).equals(lf), true);
+  const mixed = Buffer.from('a\r\nb\n');
+  assert.strictEqual(worktreeBytes(mixed, true).equals(mixed), true);
+});
+
+test('disable restore writes CRLF so autocrlf status stays clean', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { restoreOriginalStale } = require('../src/bootstrap');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-restore-'));
+  const git = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  git(['init', '-q']);
+  git(['config', 'user.email', 'a@b.c']);
+  git(['config', 'user.name', 't']);
+  git(['config', 'core.autocrlf', 'true']);
+  fs.writeFileSync(path.join(dir, 'a.c'), Buffer.from('int x;\n'));
+  git(['add', 'a.c']);
+  git(['commit', '-q', '-m', 'init']);
+  fs.mkdirSync(path.join(dir, '.zkz', 'run'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, '.zkz', 'run', '.workspace_source_encodings.json'),
+    JSON.stringify({ files: { 'a.c': 'Gbk' } }),
+    'utf8'
+  );
+  const r = restoreOriginalStale(dir);
+  assert.strictEqual(r.checked, 1);
+  assert.strictEqual(r.leftover.length, 0);
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'a.c')).toString('latin1'), 'int x;\r\n');
+  const st = git(['status', '--porcelain', '--', 'a.c']);
+  assert.strictEqual(String(st.stdout || '').trim(), '');
+  const cached = git(['diff', '--cached', '--numstat', '--', 'a.c']);
+  assert.strictEqual(String(cached.stdout || '').trim(), '');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('disable restore keeps CRLF blobs from showing as empty edits', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { restoreOriginalStale } = require('../src/bootstrap');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-crlf-'));
+  const git = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  git(['init', '-q']);
+  git(['config', 'user.email', 'a@b.c']);
+  git(['config', 'user.name', 't']);
+  git(['config', 'core.autocrlf', 'false']);
+  fs.writeFileSync(path.join(dir, 'a.c'), Buffer.from('int x;\r\n'));
+  git(['add', 'a.c']);
+  git(['commit', '-q', '-m', 'init']);
+  git(['config', 'core.autocrlf', 'true']);
+  const future = new Date(Date.now() + 5000);
+  fs.utimesSync(path.join(dir, 'a.c'), future, future);
+  fs.mkdirSync(path.join(dir, '.zkz', 'run'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, '.zkz', 'run', '.workspace_source_encodings.json'),
+    JSON.stringify({ files: { 'a.c': 'Gbk+crlf' } }),
+    'utf8'
+  );
+  const r = restoreOriginalStale(dir);
+  assert.strictEqual(r.checked, 1);
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'a.c')).toString('latin1'), 'int x;\r\n');
+  const st = git(['status', '--porcelain', '--', 'a.c']);
+  assert.strictEqual(String(st.stdout || '').trim(), '');
+  const cached = git(['diff', '--cached', '--numstat', '--', 'a.c']);
+  assert.strictEqual(String(cached.stdout || '').trim(), '');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('runtime files move from .zkz into .zkz/run', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { tablePath, keilStampPath, relocateRunFiles } = require('../src/paths');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-run-'));
+  const zkz = path.join(dir, '.zkz');
+  fs.mkdirSync(zkz, { recursive: true });
+  fs.writeFileSync(path.join(zkz, '.workspace_source_encodings.json'), '{"a.c":"Utf8"}\n', 'utf8');
+  fs.writeFileSync(path.join(zkz, 'keil-native-stamp.json'), '{}\n', 'utf8');
+  fs.mkdirSync(path.join(zkz, 'locks'));
+  fs.writeFileSync(path.join(zkz, 'locks', 'x.lock'), '1', 'utf8');
+  relocateRunFiles(dir);
+  assert.strictEqual(fs.existsSync(path.join(zkz, '.workspace_source_encodings.json')), false);
+  assert.strictEqual(fs.readFileSync(tablePath(dir), 'utf8'), '{"a.c":"Utf8"}\n');
+  assert.strictEqual(fs.readFileSync(keilStampPath(dir), 'utf8'), '{}\n');
+  assert.strictEqual(fs.existsSync(path.join(zkz, 'locks')), false);
+  assert.strictEqual(fs.readFileSync(path.join(zkz, 'run', 'locks', 'x.lock'), 'utf8'), '1');
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 runAsync();

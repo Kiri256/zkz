@@ -85,7 +85,15 @@ function gitHead(root) {
 }
 
 function compileCommandsStampPath(root) {
-  return path.join(root, '.zkz', 'compile-commands-stamp.json');
+  const from = path.join(root, '.zkz', 'compile-commands-stamp.json');
+  const to = path.join(root, '.zkz', 'run', 'compile-commands-stamp.json');
+  try {
+    if (fs.existsSync(from) && !fs.existsSync(to)) {
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.renameSync(from, to);
+    }
+  } catch (_) { /* ignore */ }
+  return to;
 }
 
 function readCompileCommandsStamp(root) {
@@ -109,7 +117,7 @@ function formatLocalNow(d) {
 
 function writeCompileCommandsStamp(root, head) {
   if (!root) return;
-  fs.mkdirSync(path.join(root, '.zkz'), { recursive: true });
+  fs.mkdirSync(path.dirname(compileCommandsStampPath(root)), { recursive: true });
   fs.writeFileSync(compileCommandsStampPath(root), JSON.stringify({
     version: 1,
     head: String(head || ''),

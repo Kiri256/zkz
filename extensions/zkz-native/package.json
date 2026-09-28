@@ -2,7 +2,7 @@
   "name": "zkz-native",
   "displayName": "zkz Native",
   "description": "Open the true-source tree as UTF-8 via git clean/smudge. Keeps repo blobs in original GBK/ASCII/UTF-8.",
-  "version": "0.0.36",
+  "version": "0.0.40",
   "publisher": "zkz",
   "engines": {
     "vscode": "^1.80.0"

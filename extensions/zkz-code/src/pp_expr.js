@@ -72,7 +72,8 @@ function evalPpExpr(expr, macros) {
       let left = parseAnd();
       while (wantOp('||')) {
         take();
-        left = (left || parseAnd()) ? 1 : 0;
+        const right = parseAnd();
+        left = (left || right) ? 1 : 0;
       }
       return left;
     };
@@ -80,7 +81,8 @@ function evalPpExpr(expr, macros) {
       let left = parseBitOr();
       while (wantOp('&&')) {
         take();
-        left = (left && parseBitOr()) ? 1 : 0;
+        const right = parseBitOr();
+        left = (left && right) ? 1 : 0;
       }
       return left;
     };

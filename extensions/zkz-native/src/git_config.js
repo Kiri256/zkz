@@ -79,7 +79,8 @@ function attributesBody(repoRoot) {
     const key = norm.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    lines.push(norm + '/** -filter -diff');
+    // !text：取消 *.c/*.h 的 -text，库文件继续按 core.autocrlf 归一化换行
+    lines.push(norm + '/** -filter -diff !text');
   }
   return lines.join('\n');
 }
@@ -87,19 +88,9 @@ function attributesBody(repoRoot) {
 function excludeBody() {
   return [
     '.zkz/keil-native/',
-    '.zkz/keil-native-stamp.json',
-    '.zkz/.workspace_source_encodings.json',
     '.zkz/config_paths.json',
-    '.zkz/zkz-native.log',
-    '.zkz/native-status.json',
-    '.zkz/skip-worktree-stamp.json',
-    '.zkz/roundtrip-failures.json',
-    '.zkz/filter-fail.json',
-    '.zkz/handshake-reject.json',
-    '.zkz/lib-encoding-warnings.json',
-    '.zkz/locks/',
-    '.zkz/compile-commands-stamp.json',
-    '.zkz/config-overlay/'
+    '.zkz/config-overlay/',
+    '.zkz/run/'
   ].join('\n');
 }
 
@@ -204,6 +195,7 @@ module.exports = {
   commandPathsExist,
   quotedPaths,
   attributesPath,
+  attributesBody,
   nodeBin,
   isNodeExecutable,
   scriptPath,

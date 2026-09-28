@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { zkzDir, sleepSync } = require('./paths');
+const { runDir, relocateRunFiles, sleepSync } = require('./paths');
 
 const chains = Object.create(null);
 const LOCK_TTL_MS = 60 * 1000;
@@ -13,7 +13,8 @@ const LOCK_POLL_MS = 50;
 function lockDirFor(key) {
   const root = path.resolve(String(key || 'default'));
   const h = crypto.createHash('sha1').update(root).digest('hex').slice(0, 16);
-  return path.join(zkzDir(root), 'locks', h + '.lock');
+  relocateRunFiles(root);
+  return path.join(runDir(root), 'locks', h + '.lock');
 }
 
 function ownerFile(lockDir) {

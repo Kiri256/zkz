@@ -3,7 +3,7 @@
 const fs = require('fs');
 const { detectKind, encodeMapped, hasCrlf, parseMapped } = require('./encoding');
 const { slashRel, tablePath, ensureZkz, isLibRel, formatLocalNow, atomicWriteJson } = require('./paths');
-const { listSourceFiles, catFileBatch, currentHead, git } = require('./git_exec');
+const { listSourceFiles, catFileBatch, currentHead, readHeadName, git } = require('./git_exec');
 const { parseNameStatusZ } = require('./git_status');
 
 function emptyTable() {
@@ -46,6 +46,16 @@ function loadMeta(repoRoot) {
   try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (_) { return null; }
 }
 
+/** 旧表只有提交号。补上当前分支名，同分支提交不再被当成过期。 */
+function noteTableRef(repoRoot, meta) {
+  if (!meta || meta.ref) return meta;
+  const ref = readHeadName(repoRoot);
+  if (!ref) return meta;
+  meta.ref = ref;
+  try { atomicWriteJson(tablePath(repoRoot), meta); } catch (_) { /* ignore */ }
+  return meta;
+}
+
 function saveTable(repoRoot, files, extra) {
   ensureZkz(repoRoot);
   const ordered = {};
@@ -53,6 +63,7 @@ function saveTable(repoRoot, files, extra) {
   const obj = Object.assign({
     version: 1,
     head: currentHead(repoRoot),
+    ref: readHeadName(repoRoot),
     generatedAt: formatLocalNow(),
     files: ordered
   }, extra || {});
@@ -123,6 +134,7 @@ async function buildTable(repoRoot, opts) {
 module.exports = {
   loadTable,
   loadMeta,
+  noteTableRef,
   saveTable,
   countByKind,
   buildTable

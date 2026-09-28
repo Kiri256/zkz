@@ -2,15 +2,21 @@
 
 const fs = require('fs');
 const path = require('path');
-const { isWorktreeClean, git, gitText, listSourceFiles, currentHead } = require('./git_exec');
-const { buildTable, loadTable, loadMeta, countByKind } = require('./enc_table');
+const { isWorktreeClean, git, gitText, listSourceFiles, currentHead, readHeadName, catFileBatchSync } = require('./git_exec');
+const { buildTable, loadTable, loadMeta, countByKind, noteTableRef } = require('./enc_table');
 const { installGitConfig, uninstallGitConfig, isInstalled } = require('./git_config');
 const { installHooks, uninstallHooks } = require('./hooks');
 const { applySkipWorktree, clearSkipWorktree } = require('./config_freeze');
-const { slashRel, isLibRel, atomicWriteJson } = require('./paths');
+const { slashRel, isLibRel, atomicWriteJson, nativeStatusPath, ensureZkz } = require('./paths');
 const { detectKind, parseMapped } = require('./encoding');
 const { loadRoundtripFailures, loadFilterFail } = require('./observe');
 const { loadLibWarnings, libWarningsNotified } = require('./lib_encoding');
+
+function diskNeedsSmudge(mappedKind, diskKind) {
+  if (mappedKind === 'Gbk' && diskKind === 'Gbk') return true;
+  if (mappedKind === 'Utf8Bom' && diskKind === 'Utf8Bom') return true;
+  return false;
+}
 
 function resmudgeStale(repoRoot) {
   const table = loadTable(repoRoot);
@@ -22,21 +28,46 @@ function resmudgeStale(repoRoot) {
     const abs = path.join(repoRoot, rel);
     let buf;
     try { buf = fs.readFileSync(abs); } catch (_) { continue; }
-    if (kind === 'Gbk' && detectKind(buf) === 'Gbk') stale.push(rel);
-    if (kind === 'Utf8Bom' && detectKind(buf) === 'Utf8Bom') stale.push(rel);
+    if (diskNeedsSmudge(kind, detectKind(buf))) stale.push(rel);
   }
   if (!stale.length) return 0;
+  // 索引 stat 已对齐时 checkout-index -f 不会重跑 smudge，GBK 会留在工作区。
+  const dirtyOut = gitText(repoRoot, ['diff', '--name-only', '--'].concat(stale), { allowFail: true });
+  const dirty = new Set(String(dirtyOut || '').split('\n').map(slashRel).filter(Boolean));
+  const todo = stale.filter((rel) => !dirty.has(rel));
+  if (!todo.length) return 0;
+  const { smudge } = require('./filter_core');
   const chunk = 80;
-  for (let i = 0; i < stale.length; i += chunk) {
-    git(repoRoot, ['checkout-index', '-f', '--'].concat(stale.slice(i, i + chunk)), { allowFail: true });
+  let wrote = 0;
+  for (let i = 0; i < todo.length; i += chunk) {
+    const slice = todo.slice(i, i + chunk);
+    const blobs = catFileBatchSync(repoRoot, slice.map((rel) => ':' + rel));
+    for (let j = 0; j < slice.length; j++) {
+      const rec = blobs[j];
+      if (!rec || rec.missing) continue;
+      const out = smudge(slice[j], rec.data, table, repoRoot);
+      try {
+        fs.writeFileSync(path.join(repoRoot, slice[j]), out);
+        wrote += 1;
+      } catch (_) { /* 编辑器锁住时跳过 */ }
+    }
   }
-  return stale.length;
+  if (wrote) {
+    // stat 仍是旧 GBK 大小时，status 会把已对齐的 UTF-8 标成修改。add 只刷新索引记录，内容哈希不变。
+    git(repoRoot, ['add', '--'].concat(todo), { allowFail: true });
+  }
+  return wrote;
 }
 
 function tableDrift(repoRoot) {
   const meta = loadMeta(repoRoot);
-  const head = currentHead(repoRoot);
-  return !!(meta && meta.head && head && meta.head !== head);
+  if (!meta) return false;
+  if (!meta.ref) {
+    noteTableRef(repoRoot, meta);
+    return false;
+  }
+  const name = readHeadName(repoRoot);
+  return !!(name && meta.ref !== name);
 }
 
 function statusSnapshot(repoRoot) {
@@ -45,7 +76,7 @@ function statusSnapshot(repoRoot) {
   const n = Object.keys(files).length;
   let unstable = [];
   try {
-    const p = path.join(repoRoot, '.zkz', 'native-status.json');
+    const p = nativeStatusPath(repoRoot);
     if (fs.existsSync(p)) {
       const obj = JSON.parse(fs.readFileSync(p, 'utf8'));
       if (Array.isArray(obj.unstable)) unstable = obj.unstable;
@@ -81,14 +112,15 @@ async function enable(repoRoot, extensionRoot, opts) {
   applySkipWorktree(repoRoot, { force: true });
   // checkout -- . 会跳过「stat 已与 index 一致」的旧 GBK 文件，必须强制写出才会跑 smudge
   git(repoRoot, ['checkout-index', '-f', '-a'], { allowFail: true });
+  resmudgeStale(repoRoot);
   git(repoRoot, ['add', '--renormalize', '.'], { allowFail: true });
   const status = gitText(repoRoot, ['status', '--porcelain'], { allowFail: true });
   const unstable = String(status || '').split('\n').map((s) => s.trim()).filter(Boolean);
   git(repoRoot, ['reset', 'HEAD'], { allowFail: true });
   try {
-    const { ensureZkz, formatLocalNow } = require('./paths');
+    const { formatLocalNow } = require('./paths');
     ensureZkz(repoRoot);
-    atomicWriteJson(path.join(repoRoot, '.zkz', 'native-status.json'), {
+    atomicWriteJson(nativeStatusPath(repoRoot), {
       unstable: unstable,
       at: formatLocalNow()
     });
@@ -115,11 +147,33 @@ function listMappedRels(repoRoot, kinds) {
   return rels;
 }
 
-function checkoutHeadRels(repoRoot, rels) {
+function wantsAutocrlf(repoRoot) {
+  const v = gitText(repoRoot, ['config', '--get', 'core.autocrlf'], { allowFail: true }).trim().toLowerCase();
+  return v === 'true';
+}
+
+/** autocrlf=true 时工作区要用 CRLF，否则 status 会把和 blob 相同的 LF 标成修改。blob 里已有 CR 则原样写。 */
+function worktreeBytes(blob, autocrlf) {
+  const src = blob ? Buffer.from(blob) : Buffer.alloc(0);
+  if (!autocrlf || !src.length || src.includes(0x0d)) return src;
+  let n = 0;
+  for (let i = 0; i < src.length; i++) if (src[i] === 0x0a) n += 1;
+  if (!n) return src;
+  const out = Buffer.allocUnsafe(src.length + n);
+  let j = 0;
+  for (let i = 0; i < src.length; i++) {
+    if (src[i] === 0x0a) out[j++] = 0x0d;
+    out[j++] = src[i];
+  }
+  return out;
+}
+
+function gitAddChunks(repoRoot, rels, prefix) {
   if (!rels || !rels.length) return;
-  const chunk = 80;
+  const chunk = 40;
+  const head = prefix || ['add', '--'];
   for (let i = 0; i < rels.length; i += chunk) {
-    git(repoRoot, ['checkout', 'HEAD', '--'].concat(rels.slice(i, i + chunk)), { allowFail: true });
+    git(repoRoot, head.concat(rels.slice(i, i + chunk)), { allowFail: true });
   }
 }
 
@@ -140,32 +194,39 @@ function listEncodingMismatches(repoRoot) {
   return stale;
 }
 
-function writeIndexBlobs(repoRoot, rels) {
-  let n = 0;
-  for (const rel of rels) {
-    const r = git(repoRoot, ['cat-file', 'blob', ':' + rel], { encoding: 'buffer', allowFail: true });
-    if (r.status !== 0 || !r.stdout) continue;
-    try {
-      fs.writeFileSync(path.join(repoRoot, rel), r.stdout);
-      n += 1;
-    } catch (_) { /* editor lock */ }
-  }
-  return n;
-}
-
-/** disable 后把仍为 UTF-8 的原 GBK 文件强制写回。checkout-index -a 会跳过 stat 与 index 一致的工作区。 */
+/** disable 后按 HEAD 写回原编码。一次 cat-file 批量读，按 autocrlf 补 CRLF，再 add 对齐索引。 */
 function restoreOriginalStale(repoRoot) {
-  const mapped = listMappedRels(repoRoot, ['Gbk', 'Utf8Bom']);
-  checkoutHeadRels(repoRoot, mapped);
-  let stale = listEncodingMismatches(repoRoot);
-  if (stale.length) {
-    checkoutHeadRels(repoRoot, stale);
-    stale = listEncodingMismatches(repoRoot);
-    if (stale.length) writeIndexBlobs(repoRoot, stale);
+  const rels = listMappedRels(repoRoot, ['Gbk', 'Utf8Bom']);
+  if (!rels.length) return { checked: 0, leftover: [] };
+  const autocrlf = wantsAutocrlf(repoRoot);
+  const wrote = [];
+  const statOnly = [];
+  const chunk = 80;
+  for (let i = 0; i < rels.length; i += chunk) {
+    const slice = rels.slice(i, i + chunk);
+    const blobs = catFileBatchSync(repoRoot, slice.map((rel) => 'HEAD:' + rel));
+    for (let j = 0; j < slice.length; j++) {
+      const rec = blobs[j];
+      if (!rec || rec.missing) continue;
+      const out = worktreeBytes(rec.data, autocrlf);
+      const abs = path.join(repoRoot, slice[j]);
+      let cur = null;
+      try { cur = fs.readFileSync(abs); } catch (_) { cur = null; }
+      if (cur && cur.equals(out)) {
+        if (cur.equals(Buffer.from(rec.data))) statOnly.push(slice[j]);
+        else wrote.push(slice[j]);
+        continue;
+      }
+      try {
+        fs.writeFileSync(abs, out);
+        wrote.push(slice[j]);
+      } catch (_) { /* editor lock */ }
+    }
   }
-  git(repoRoot, ['update-index', '-q', '--refresh'], { allowFail: true });
+  gitAddChunks(repoRoot, wrote);
+  gitAddChunks(repoRoot, statOnly, ['-c', 'core.autocrlf=false', 'add', '--']);
   return {
-    checked: mapped.length,
+    checked: rels.length,
     leftover: listEncodingMismatches(repoRoot)
   };
 }
@@ -227,4 +288,4 @@ async function refresh(repoRoot, extensionRoot, opts) {
   };
 }
 
-module.exports = { enable, disable, refresh, silentRefresh, statusSnapshot, resmudgeStale, restoreOriginalStale, tableDrift };
+module.exports = { enable, disable, refresh, silentRefresh, statusSnapshot, resmudgeStale, diskNeedsSmudge, restoreOriginalStale, worktreeBytes, tableDrift };
