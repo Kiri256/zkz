@@ -1,0 +1,5 @@
+cache
+_archive_tmp
+__pycache__
+*.vsix
+.vscode

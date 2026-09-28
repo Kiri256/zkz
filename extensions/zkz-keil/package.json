@@ -1,0 +1,138 @@
+{
+  "name": "zkz-keil",
+  "displayName": "zkz Keil",
+  "description": "Keil UV4 build, J-Link flash, and Cortex-Debug prepare. True-source + zkz-native builds the keil-native tree.",
+  "version": "1.0.15",
+  "publisher": "zkz",
+  "icon": "media/zkz-keil.png",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onTaskType:zkz-keil"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "zkz-keil.keilBuild",
+        "title": "zkz: Keil Build",
+        "icon": "$(tools)",
+        "enablement": "zkzKeil.paired"
+      },
+      {
+        "command": "zkz-keil.keilRebuild",
+        "title": "zkz: Keil Rebuild",
+        "icon": "$(sync)",
+        "enablement": "zkzKeil.paired"
+      },
+      {
+        "command": "zkz-keil.keilFlash",
+        "title": "zkz: J-Link Flash",
+        "icon": "$(zap)",
+        "enablement": "zkzKeil.paired"
+      },
+      {
+        "command": "zkz-keil.prepareCortexDebug",
+        "title": "zkz: Prepare Cortex Debug",
+        "icon": "$(debug-alt)",
+        "enablement": "zkzKeil.paired"
+      }
+    ],
+    "taskDefinitions": [
+      {
+        "type": "zkz-keil",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "build, rebuild, flash, prepare, buildFlash, buildFlashPrepare, flashPrepare"
+          }
+        }
+      }
+    ],
+    "configuration": {
+      "title": "zkz Keil",
+      "properties": {
+        "zkz-keil.uv4Path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to UV4.exe. Empty: env ZKZ_KEIL_UV4, then common Keil install locations."
+        },
+        "zkz-keil.flavor": {
+          "type": "string",
+          "enum": ["auto", "h750", "f429"],
+          "default": "auto",
+          "description": "Board flavor. auto: use H750 uvprojx if present, else F429."
+        },
+        "zkz-keil.speedKHz": {
+          "type": "number",
+          "default": 6000,
+          "description": "J-Link SWD speed in kHz."
+        },
+        "zkz-keil.patchGlobalJLinkDevices": {
+          "type": "boolean",
+          "default": true,
+          "description": "Also patch the J-Link install JLinkDevices.xml for H750 QSPI. APPDATA JLinkDevices is always written."
+        },
+        "zkz-keil.h750.jlinkPath": {
+          "type": "string",
+          "default": "",
+          "description": "JLink.exe for H750. Empty: env ZKZ_JLINK_698, then Program Files SEGGER JLink."
+        },
+        "zkz-keil.h750.flmPath": {
+          "type": "string",
+          "default": "",
+          "description": "H750 QSPI FLM. Empty: env ZKZ_H750_FLM, then common Keil Flash folder."
+        },
+        "zkz-keil.h750.device": {
+          "type": "string",
+          "default": "STM32H750IB",
+          "description": "J-Link device name for H750."
+        },
+        "zkz-keil.h750.target": {
+          "type": "string",
+          "default": "H750_N",
+          "description": "Keil target name for H750."
+        },
+        "zkz-keil.h750.qspiBase": {
+          "type": "string",
+          "default": "0x90000000",
+          "description": "H750 QSPI base address. HEX records outside this window are refused."
+        },
+        "zkz-keil.h750.qspiSize": {
+          "type": "string",
+          "default": "0x00400000",
+          "description": "H750 QSPI window size."
+        },
+        "zkz-keil.f429.jlinkPath": {
+          "type": "string",
+          "default": "",
+          "description": "JLink.exe for F429. Empty: env ZKZ_JLINK_502, then JLink_V502c."
+        },
+        "zkz-keil.f429.device": {
+          "type": "string",
+          "default": "STM32F429BI",
+          "description": "J-Link device name for F429."
+        },
+        "zkz-keil.f429.target": {
+          "type": "string",
+          "default": "Flash",
+          "description": "Keil target name for F429."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node test/run.js"
+  },
+  "dependencies": {
+    "iconv-lite": "^0.6.3"
+  }
+}
