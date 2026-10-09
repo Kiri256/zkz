@@ -1,0 +1,41 @@
+{
+  "native": {
+    "enabled": true,
+    "glob": "*.c,*.h",
+    "paths": [
+      ".cursor/rules",
+      ".cursor/skills",
+      ".codex/skills",
+      ".vscode/settings.json"
+    ]
+  },
+  "keil": {
+    "uv4Path": "",
+    "gdbPath": "",
+    "flavor": "f429",
+    "speedKHz": 6000,
+    "debugSpeedKHz": 4000,
+    "patchGlobalJLinkDevices": true,
+    "h750": {
+      "jlinkPath": "",
+      "flmPath": "",
+      "device": "STM32H750IB",
+      "svdFile": "",
+      "target": "H750_N",
+      "qspiBase": "0x90000000",
+      "qspiSize": "0x00400000"
+    },
+    "f429": {
+      "jlinkPath": "",
+      "device": "STM32F429BI",
+      "svdFile": "",
+      "target": "Flash"
+    }
+  },
+  "code": {
+    "ifdefFold": {
+      "enabled": true,
+      "minLines": 2
+    }
+  }
+}

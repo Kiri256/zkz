@@ -1,0 +1,5 @@
+test/**
+REFACTOR_PLAN.md
+python/**
+bin/**
+**/*.vsix
