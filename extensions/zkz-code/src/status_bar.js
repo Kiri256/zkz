@@ -17,6 +17,7 @@ const CODE_MENU = [
   { label: '展开未激活 #if', command: 'unfoldInactiveIfdef' },
   { label: '刷新折叠', command: 'refreshIfdefFolds' },
   { label: '检查 FFFD', command: 'checkFffd' },
+  { label: '恢复 CMSIS Include（仅工作区）', command: 'restoreCmsisInclude' },
   { label: '刷新状态栏', command: 'refreshStatus' }
 ];
 

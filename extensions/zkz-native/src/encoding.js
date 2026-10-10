@@ -156,39 +156,10 @@ function applyClean(kind, wtBytes, opts) {
   throw new Error('unknown encoding kind: ' + k);
 }
 
-function storeNewAsGbk(buf) {
-  const kind = detectKind(buf);
-  let text = '';
-  try {
-    text = kind === 'Gbk' ? decodeCp936(buf) : wtToText(buf);
-  } catch (e) {
-    const err = new Error('new file is not valid GBK or UTF-8');
-    err.code = 'ZKZ_NEW_NOT_UTF8';
-    throw err;
-  }
-  if (!roundtripOk(text)) {
-    const hint = firstUnencodable(text);
-    const err = new Error('new file cannot be stored as GBK' + (hint ? ' (' + hint + ')' : ''));
-    err.code = 'ZKZ_ROUNDTRIP';
-    throw err;
-  }
-  const crlf = hasCrlf(buf);
-  const wt = Buffer.from(text, 'utf8');
-  return {
-    blob: applyClean('Gbk', wt, { crlf: crlf }),
-    mapped: encodeMapped('Gbk', crlf),
-    worktree: buf.equals(wt) ? null : wt
-  };
-}
-
 function planNewFile(wtBytes) {
   const buf = Buffer.from(wtBytes || []);
   const kind = detectKind(buf);
-  if (kind === 'Ascii') {
-    return { blob: buf, mapped: encodeMapped('Ascii', hasCrlf(buf)), worktree: null };
-  }
-  if (kind === 'Utf8' || kind === 'Utf8Bom' || kind === 'Gbk') return storeNewAsGbk(buf);
-  throw new Error('unknown encoding kind: ' + kind);
+  return { blob: buf, mapped: encodeMapped(kind, hasCrlf(buf)), worktree: null };
 }
 
 function kindForNewFile(wtBytes) {

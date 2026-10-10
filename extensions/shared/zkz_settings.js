@@ -53,20 +53,37 @@ function clone(obj) {
   return JSON.parse(JSON.stringify(obj));
 }
 
-function load(root) {
+const settingsCache = new Map();
+const SETTINGS_CACHE_LIMIT = 8;
+
+function readSettings(root) {
   if (!root) return {};
   const file = settingsFile(root);
   try {
-    if (!fs.existsSync(file)) return {};
+    const st = fs.statSync(file);
+    const stamp = st.mtimeMs + '|' + st.ctimeMs + '|' + st.size;
+    const hit = settingsCache.get(file);
+    if (hit && hit.stamp === stamp) return hit.obj;
     const obj = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
+    const value = obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
+    settingsCache.delete(file);
+    settingsCache.set(file, { stamp, obj: value });
+    if (settingsCache.size > SETTINGS_CACHE_LIMIT) settingsCache.delete(settingsCache.keys().next().value);
+    return value;
   } catch (_) {
+    settingsCache.delete(file);
     return {};
   }
 }
 
+function load(root) {
+  // Callers may modify the returned object before writing it back.
+  return clone(readSettings(root));
+}
+
 function write(root, obj) {
   const file = settingsFile(root);
+  settingsCache.delete(file);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const text = JSON.stringify(obj, null, 2) + '\n';
   const tmp = file + '.tmp';
@@ -138,9 +155,9 @@ function missing(v) {
 }
 
 function get(root, section, key, fallback) {
-  const sec = load(root)[section];
+  const sec = readSettings(root)[section];
   const v = dig(sec, key);
-  return missing(v) ? fallback : v;
+  return missing(v) ? fallback : (typeof v === 'object' ? clone(v) : v);
 }
 
 function getNumber(root, section, key, fallback) {

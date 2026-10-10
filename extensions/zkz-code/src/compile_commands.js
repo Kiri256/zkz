@@ -2,9 +2,14 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const { XMLParser, XMLValidator } = require('fast-xml-parser');
 const { writeCompileCommandsStamp, gitHead } = require('./cc_stamp');
 const { resolveKeilLayout: resolveShared, layoutOptionsFromGet } = require('../../shared/keil_layout');
 const { get } = require('../../shared/zkz_settings');
+const { record: recordPerf } = require('../../shared/perf');
+
+let compileCache = null;
 
 function readKeilSetting(root) {
   return function (key, fallback) {
@@ -16,51 +21,13 @@ function resolveKeilLayout(root) {
   return resolveShared(root, layoutOptionsFromGet(readKeilSetting(root)));
 }
 
-function decodeXml(text) {
-  return String(text || '')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&amp;/g, '&');
+function list(value) {
+  return value == null ? [] : Array.isArray(value) ? value : [value];
 }
 
-function tagText(block, tag) {
-  const re = new RegExp('<' + tag + '>([\\s\\S]*?)</' + tag + '>');
-  const m = re.exec(String(block || ''));
-  return m ? decodeXml(m[1].trim()) : '';
-}
-
-function blocks(xml, tag) {
-  const src = String(xml || '');
-  const open = '<' + tag + '>';
-  const close = '</' + tag + '>';
-  const out = [];
-  let i = 0;
-  while (i < src.length) {
-    const a = src.indexOf(open, i);
-    if (a < 0) break;
-    let depth = 1;
-    let j = a + open.length;
-    let closed = -1;
-    while (j < src.length && depth > 0) {
-      const nOpen = src.indexOf(open, j);
-      const nClose = src.indexOf(close, j);
-      if (nClose < 0) break;
-      if (nOpen >= 0 && nOpen < nClose) {
-        depth += 1;
-        j = nOpen + open.length;
-      } else {
-        depth -= 1;
-        j = nClose + close.length;
-        if (depth === 0) closed = nClose;
-      }
-    }
-    if (closed < 0) break;
-    out.push(src.slice(a + open.length, closed));
-    i = closed + close.length;
-  }
-  return out;
+function tagText(node, tag) {
+  const value = node && node[tag];
+  return value == null || typeof value === 'object' ? '' : String(value).trim();
 }
 
 function splitList(text, sep) {
@@ -94,9 +61,9 @@ function pickTarget(targets, name) {
 }
 
 function compilerFlags(targetXml) {
-  const opt = blocks(targetXml, 'TargetOption')[0] || '';
-  const cads = blocks(opt, 'Cads')[0] || '';
-  const vc = blocks(cads, 'VariousControls')[0] || '';
+  const opt = targetXml.TargetOption || {};
+  const cads = (opt.TargetArmAds || opt).Cads || {};
+  const vc = cads.VariousControls || {};
   return {
     defines: splitList(tagText(vc, 'Define'), ','),
     undefines: splitList(tagText(vc, 'Undefine'), ','),
@@ -109,7 +76,14 @@ function isCSource(rel) {
 }
 
 function buildCompileCommands(xml, mdk, targetName) {
-  const target = pickTarget(blocks(xml, 'Target'), targetName);
+  const valid = XMLValidator.validate(xml);
+  if (valid !== true) {
+    const err = new Error('Invalid Keil XML: ' + valid.err.msg + ' (line ' + valid.err.line + ')');
+    err.code = 'ZKZ_INVALID_XML';
+    throw err;
+  }
+  const project = new XMLParser({ parseTagValue: false, processEntities: true, htmlEntities: true }).parse(xml).Project || {};
+  const target = pickTarget(list(project.Targets && project.Targets.Target), targetName);
   const flags = compilerFlags(target);
   const args = ['clang'];
   for (let i = 0; i < flags.includes.length; i++) {
@@ -120,12 +94,14 @@ function buildCompileCommands(xml, mdk, targetName) {
   for (let i = 0; i < flags.defines.length; i++) args.push('-D' + flags.defines[i]);
   const dir = normPath(mdk);
   const entries = [];
-  const files = blocks(target, 'File');
+  const files = list(target.Groups && target.Groups.Group)
+    .flatMap((group) => list(group.Files && group.Files.File));
   for (let i = 0; i < files.length; i++) {
     const fileXml = files[i];
     const type = tagText(fileXml, 'FileType');
     if (type !== '1' && type !== '8') continue;
-    if (tagText(fileXml, 'IncludeInBuild') === '0') continue;
+    const common = fileXml.FileOption && fileXml.FileOption.CommonProperty;
+    if (tagText(common, 'IncludeInBuild') === '0') continue;
     const rel = tagText(fileXml, 'FilePath');
     if (!isCSource(rel)) continue;
     const file = absFromMdk(mdk, rel);
@@ -150,7 +126,17 @@ function projectFileOf(layout) {
   return '';
 }
 
+function writeIfChanged(file, text) {
+  try {
+    if (fs.readFileSync(file, 'utf8') === text) return;
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+  fs.writeFileSync(file, text, 'utf8');
+}
+
 async function generateOnRoot(root, log) {
+  const perfStart = process.hrtime.bigint();
   const layout = resolveKeilLayout(root);
   const proj = projectFileOf(layout);
   if (!proj) {
@@ -161,15 +147,45 @@ async function generateOnRoot(root, log) {
   const targetName = (layout && layout.defaultTarget) || '';
   if (log) log('generate compile_commands flavor=' + (layout.flavor || '') + ' uvproj=' + path.basename(proj) + ' target=' + targetName);
   const xml = fs.readFileSync(proj, 'utf8').replace(/^\uFEFF/, '');
-  const built = buildCompileCommands(xml, mdk, targetName);
+  const cacheKey = crypto.createHash('sha1').update('v3\0' + path.resolve(mdk)).update('\0' + xml).update('\0' + (layout.flavor || '')).update('\0' + targetName).digest('hex');
+  const cacheFile = path.join(root, '.zkz', 'run', 'compile-commands-cache.json');
+  let cached = compileCache && compileCache.key === cacheKey ? compileCache : null;
+  const memoryHit = !!cached;
+  if (!cached) {
+    try {
+      const obj = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+      if (obj && obj.key === cacheKey && typeof obj.text === 'string') {
+        const entries = JSON.parse(obj.text);
+        if (Array.isArray(entries) && entries.length && entries.every((e) => e && typeof e.file === 'string' && typeof e.directory === 'string' && Array.isArray(e.arguments))) {
+          cached = { key: cacheKey, text: obj.text, entries, target: obj.target || targetName };
+        }
+      }
+    } catch (_) { /* invalid or missing cache is rebuilt */ }
+  }
+  const built = cached || buildCompileCommands(xml, mdk, targetName);
   if (!built.entries.length) throw new Error('目标 ' + built.target + ' 里没有 C 源文件');
-  const text = JSON.stringify(built.entries, null, 4) + '\n';
+  const text = cached ? cached.text : JSON.stringify(built.entries, null, 4) + '\n';
+  compileCache = { key: cacheKey, text, entries: built.entries, target: built.target };
+  try {
+    if (!cached) {
+      fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+      fs.writeFileSync(cacheFile, JSON.stringify({ key: cacheKey, text: text, target: built.target }, null, 2) + '\n', 'utf8');
+    }
+  } catch (_) { /* cache is an optimization, output generation must continue */ }
   const src = path.join(mdk, 'compile_commands.json');
   const dst = path.join(root, 'compile_commands.json');
-  fs.writeFileSync(src, text, 'utf8');
-  if (path.resolve(src) !== path.resolve(dst)) fs.writeFileSync(dst, text, 'utf8');
+  writeIfChanged(src, text);
+  if (path.resolve(src) !== path.resolve(dst)) writeIfChanged(dst, text);
   try { writeCompileCommandsStamp(root, gitHead(root)); } catch (_) { /* ignore */ }
   if (log) log('compile_commands.json ready: ' + dst + ' (' + built.entries.length + ')');
+  recordPerf(root, 'zkz-code.generateCompileCommands', {
+    ms: Number(process.hrtime.bigint() - perfStart) / 1e6,
+    entries: built.entries.length,
+    flavor: layout.flavor || '',
+    target: targetName,
+    cacheHit: !!cached,
+    memoryHit
+  });
   return 'generated';
 }
 

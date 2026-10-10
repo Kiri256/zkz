@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
 const {
   ensureZkz, slashRel, formatLocalNow, atomicWriteJson,
   roundtripFailPath, filterFailPath, handshakeRejectPath, appendLog
@@ -21,7 +22,12 @@ function readJson(p, fallback) {
 function loadRoundtripFailures(repoRoot) {
   const obj = readJson(roundtripFailPath(repoRoot), { files: {} });
   const files = (obj && obj.files && typeof obj.files === 'object') ? obj.files : {};
-  return Object.keys(files).sort().map((rel) => ({
+  return Object.keys(files).filter((rel) => {
+    try { return fs.statSync(path.join(repoRoot, rel)).isFile(); } catch (err) {
+      // A removed or renamed source no longer contributes an active warning.
+      return err.code !== 'ENOENT' && err.code !== 'ENOTDIR';
+    }
+  }).sort().map((rel) => ({
     rel: rel,
     message: files[rel] && files[rel].message ? String(files[rel].message) : '',
     at: files[rel] && files[rel].at ? String(files[rel].at) : ''

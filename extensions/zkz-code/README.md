@@ -41,6 +41,7 @@
 | `zkz-code.invalidateMacroImpactIndex` | 按白名单变化删对应 `.idx` |
 | `zkz-code.checkFffd` | 检查当前文件 U+FFFD（打开/保存业务源也会扫） |
 | `zkz-code.refreshStatus` | 只刷徽章 |
+| `zkz-code.restoreCmsisInclude` | 从固定基线恢复 CMSIS Include 到工作区；不暂存、不提交，目录已有文件时跳过 |
 
 `zkz-code` 自己监视 `HEAD`，换分支后刷新宏和 `compile_commands`。`beginYtMacroCheckoutGuard` / `syncYtVersionAfterCheckout` / `onHeadChanged` 仍可调用，不出现在命令面板。
 
@@ -49,3 +50,5 @@
 `zkz-code` 状态栏菜单是一层：折叠、展开、刷新折叠、检查 FFFD、刷新状态栏，以及当前启用的宏。点宏名直接跳到定义。clangd 菜单是刷新 `compile_commands`、按宏影响刷新索引、重建索引、重启 clangd。没有 Keil 工程或 `compile_commands.json` 时 clangd 这条不显示。都不出现在编辑器标题栏或右键菜单。
 
 `macroKeys` / `scanTops` / FFFD 跳过目录读真源 `.zkz/workspace_lists.json`。同一文件的 `libraryDirNames` 给 zkz-native 决定编烧树里哪些目录做成链接。
+
+`compile_commands` 使用 `fast-xml-parser` 校验并解析工程 XML，支持属性、注释、CDATA、自闭合节点和数字实体；只从 `Project/Targets/Target` 选择编译目标，忽略调试选项中的嵌套 Target。Cads 支持实际工程的 `TargetArmAds` 层级。格式损坏时报告行号，避免生成部分数据库。解析算法版本参与缓存键，升级后旧缓存自动失效。

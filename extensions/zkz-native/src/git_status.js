@@ -39,9 +39,13 @@ function parseNameStatusZ(out) {
 function parsePorcelainZ(out) {
   const set = new Set();
   const parts = String(out || '').split('\0').filter(Boolean);
-  for (const rec of parts) {
-    const pathPart = rec.length > 3 ? rec.slice(3) : rec;
-    if (pathPart) set.add(slashRel(pathPart.split(' -> ').pop()));
+  for (let i = 0; i < parts.length; i++) {
+    const rec = parts[i];
+    const status = rec.slice(0, 2);
+    const pathname = rec.slice(3);
+    if (pathname) set.add(slashRel(pathname));
+    // Porcelain -z puts the destination first, then the unprefixed origin.
+    if (/[RC]/.test(status) && i + 1 < parts.length) set.add(slashRel(parts[++i]));
   }
   return set;
 }

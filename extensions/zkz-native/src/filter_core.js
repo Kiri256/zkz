@@ -1,7 +1,5 @@
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
 const { slashRel, isLibRel } = require('./paths');
 const { detectKind, applySmudge, applyClean, planNewFile, parseMapped } = require('./encoding');
 const { noteNewFile } = require('./enc_table');
@@ -28,8 +26,8 @@ function reconcileSmudgeKind(actual, hinted) {
   return hint || act;
 }
 
-function smudge(pathname, blobBytes, table, repoRoot) {
-  if (repoRoot && isLibRel(repoRoot, pathname)) return Buffer.from(blobBytes || []);
+function smudge(pathname, blobBytes, table, repoRoot, isLibraryPath) {
+  if (repoRoot && (isLibraryPath ? isLibraryPath(pathname) : isLibRel(repoRoot, pathname))) return Buffer.from(blobBytes || []);
   const mapped = lookupKind(table, pathname);
   const hinted = mapped ? parseMapped(mapped).kind : '';
   const actual = detectKind(blobBytes);
@@ -37,30 +35,14 @@ function smudge(pathname, blobBytes, table, repoRoot) {
   return applySmudge(kind, blobBytes);
 }
 
-function replaceFileIfUnchanged(file, seen, next) {
-  let cur = null;
-  try { cur = fs.readFileSync(file); } catch (_) { return; }
-  const prev = Buffer.from(seen || []);
-  if (!cur.equals(prev) || cur.equals(next)) return;
-  const tmp = file + '.zkz-wt';
-  fs.writeFileSync(tmp, next);
-  try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (_) { /* replace via rename */ }
-  try {
-    fs.renameSync(tmp, file);
-  } catch (_) {
-    fs.copyFileSync(tmp, file);
-    try { fs.unlinkSync(tmp); } catch (e2) { /* ignore */ }
-  }
-}
-
-function clean(pathname, wtBytes, table, repoRoot) {
-  if (repoRoot && isLibRel(repoRoot, pathname)) return Buffer.from(wtBytes || []);
+function clean(pathname, wtBytes, table, repoRoot, isLibraryPath) {
+  if (repoRoot && (isLibraryPath ? isLibraryPath(pathname) : isLibRel(repoRoot, pathname))) return Buffer.from(wtBytes || []);
   const mapped = lookupKind(table, pathname);
   if (!mapped) {
     const plan = planNewFile(wtBytes);
     if (repoRoot && pathname) {
       noteNewFile(repoRoot, pathname, plan.mapped);
-      if (plan.worktree) replaceFileIfUnchanged(path.join(repoRoot, pathname), wtBytes, plan.worktree);
+      if (table) table[slashRel(pathname)] = plan.mapped;
     }
     return plan.blob;
   }

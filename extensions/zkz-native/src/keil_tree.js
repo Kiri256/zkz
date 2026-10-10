@@ -2,19 +2,34 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { clean } = require('./filter_core');
 const { loadTable } = require('./enc_table');
 const {
   slashRel, keilNativeRoot, keilStampPath, ensureZkz, isSourceExt,
-  DEFAULT_SKIP_DIR, libTops, isLibRel, isReparse, atomicWriteJson
+  DEFAULT_SKIP_DIR, libTops, libTopNames, createLibMatcher, isReparse, atomicWriteJson
 } = require('./paths');
 const { currentHead, currentBranch, gitText, git } = require('./git_exec');
-const { parsePorcelainZ } = require('./git_status');
-const { inspectLibEncoding, formatLibWarning } = require('./lib_encoding');
+const { inspectLibEncoding, formatLibWarning, loadLibWarnings, saveLibWarnings } = require('./lib_encoding');
+const { record: recordPerf } = require('../../shared/perf');
 
 const BUSINESS_FALLBACK = ['User', 'core', 'driver', 'application', 'fpga_motion', 'emWin'];
 const SKIP_DIR = new Set(DEFAULT_SKIP_DIR);
 const PROJECT_KEEP_EXT = ['.sct', '.ini', '.scf'];
+const SYNC_READY_FILE = '.zkz-sync-ready';
+const SYNC_VERSION = 4;
+
+function syncFingerprint(table, libraries) {
+  return crypto.createHash('sha256').update(JSON.stringify([
+    libraries, Object.keys(table).sort().map((key) => [key, table[key]])
+  ])).digest('hex');
+}
+
+function skipSyncPath(rel) {
+  const parts = slashRel(rel).split('/');
+  const inProject = parts[0] === 'Project' || parts.slice(0, 3).join('/') === 'H750/Projects/MDK-ARM';
+  return parts.slice(0, -1).some(skipDirName) && !(inProject && keepProjectFile(rel));
+}
 
 function readJson(p, fallback) {
   try {
@@ -38,10 +53,10 @@ function keepProjectFile(name) {
   return PROJECT_KEEP_EXT.indexOf(ext) >= 0;
 }
 
-function listTopDirs(repoRoot) {
+function listTopDirs(repoRoot, libraryTops) {
   let ents = [];
   try { ents = fs.readdirSync(repoRoot, { withFileTypes: true }); } catch (_) { return []; }
-  const libs = new Set(libTops(repoRoot).map((s) => s.toLowerCase()));
+  const libs = new Set(libraryTops.map((s) => s.toLowerCase()));
   const out = [];
   for (const ent of ents) {
     if (skipDirName(ent.name) || ent.name === 'Project' || ent.name === 'H750') continue;
@@ -122,15 +137,45 @@ function copyFile(src, dst) {
 function fileStamp(p) {
   try {
     const st = fs.statSync(p);
-    return String(st.size) + '|' + String(Math.round(st.mtimeMs));
-  } catch (_) {
+    if (!st.isFile()) return '';
+    return [st.size, st.mtimeMs, st.ctimeMs, st.ino].join('|');
+  } catch (err) {
+    if (err.code !== 'ENOENT' && err.code !== 'ENOTDIR') throw err;
     return '';
   }
 }
 
-function changedRels(repoRoot) {
-  const out = gitText(repoRoot, ['status', '--porcelain', '-z'], { allowFail: true });
-  return parsePorcelainZ(out);
+function sourceSnapshot(repoRoot, stamp, isLibraryPath, topDirs) {
+  const started = process.hrtime.bigint();
+  // Enumerate names without Git's index/worktree comparison and clean filters.
+  // Compare against the last build, since staging alone does not change inputs.
+  const out = gitText(repoRoot, ['ls-files', '--cached', '--others', '--exclude-standard', '-z']);
+  const gitListMs = Number(process.hrtime.bigint() - started) / 1e6;
+  const paths = new Set(out.split('\0').filter(Boolean).map(slashRel));
+  Object.keys(stamp.files || {}).forEach((rel) => paths.add(rel));
+  Object.keys(stamp.libraryFiles || {}).forEach((rel) => paths.add(rel));
+  collectProjectRels(repoRoot).forEach((rel) => paths.add(rel));
+  const tops = new Set(topDirs);
+  const files = {};
+  const libraryFiles = {};
+  const dirty = new Set();
+  for (const rel of paths) {
+    const library = isLibraryPath(rel);
+    if (library) {
+      if (!isSourceExt(rel)) continue;
+    } else {
+      const top = rel.split('/')[0];
+      const wasCopied = Object.prototype.hasOwnProperty.call(stamp.files || {}, rel);
+      if (!(wasCopied || tops.has(top) || rel.startsWith('Project/') || rel.startsWith('H750/Projects/MDK-ARM/'))) continue;
+      if (skipSyncPath(rel)) continue;
+    }
+    const previous = library ? stamp.libraryFiles : stamp.files;
+    const current = fileStamp(path.join(repoRoot, rel));
+    if (current) (library ? libraryFiles : files)[rel] = current;
+    if (current !== ((previous && previous[rel]) || '')) dirty.add(rel);
+  }
+  return { files, libraryFiles, dirty, gitListMs,
+    sourceScanMs: Number(process.hrtime.bigint() - started) / 1e6 - gitListMs };
 }
 
 function insideRepo(repoRoot, target) {
@@ -171,14 +216,14 @@ function ensureRealParent(repoRoot, kn, rel) {
   }
 }
 
-function writeSourceOrCopy(repoRoot, kn, table, rel) {
+function writeSourceOrCopy(repoRoot, kn, table, rel, isLibraryPath) {
   ensureRealParent(repoRoot, kn, rel);
   const src = path.join(repoRoot, rel);
   const dst = path.join(kn, rel);
   if (isSourceExt(rel)) {
     const wt = fs.readFileSync(src);
-    // 未入表的新文件在 clean 里定编码：中文存 GBK 并写入编码表，工作区留 UTF-8。
-    const bytes = clean(rel, wt, table, repoRoot);
+    // 未入表的新文件按当前编码登记，编译树保留原字节。
+    const bytes = clean(rel, wt, table, repoRoot, isLibraryPath);
     fs.mkdirSync(path.dirname(dst), { recursive: true });
     fs.writeFileSync(dst, bytes);
     try {
@@ -190,20 +235,27 @@ function writeSourceOrCopy(repoRoot, kn, table, rel) {
   }
 }
 
-function syncOne(repoRoot, kn, table, stamp, nextStamp, rel, full, dirty) {
+function syncOne(repoRoot, kn, table, stamp, nextStamp, rel, full, dirty, isLibraryPath) {
+  if (skipSyncPath(rel)) return 'skipped';
   // 库由 junction 统一挂载：绝不逐文件拷贝/删除（否则会写进 junction 目标即真实仓库，或把 junction 内容删空）。
-  if (isLibRel(repoRoot, rel)) return 'skipped';
+  if (isLibraryPath(rel)) return 'skipped';
   const src = path.join(repoRoot, rel);
   const dst = path.join(kn, rel);
   const st = fileStamp(src);
   if (!st) {
+    delete nextStamp.files[rel];
+    delete nextStamp.targets[rel];
     try { if (fs.existsSync(dst) && fs.statSync(dst).isFile()) fs.unlinkSync(dst); } catch (_) { /* ignore */ }
     return 'pruned';
   }
   nextStamp.files[rel] = st;
   const unchanged = !full && !dirty.has(rel) && stamp.files && stamp.files[rel] === st && fs.existsSync(dst);
-  if (unchanged) return 'skipped';
-  writeSourceOrCopy(repoRoot, kn, table, rel);
+  if (unchanged) {
+    nextStamp.targets[rel] = stamp.targets[rel];
+    return 'skipped';
+  }
+  writeSourceOrCopy(repoRoot, kn, table, rel, isLibraryPath);
+  nextStamp.targets[rel] = fileStamp(dst);
   return 'written';
 }
 
@@ -266,19 +318,43 @@ function pruneMissing(repoRoot, kn, relDir) {
 }
 
 function syncKeilTree(repoRoot, emit) {
+  const perfStart = process.hrtime.bigint();
   const log = (m) => { if (emit) emit(m); };
   const kn = keilNativeRoot(repoRoot);
   fs.mkdirSync(kn, { recursive: true });
   const table = loadTable(repoRoot);
+  const isLibraryPath = createLibMatcher(repoRoot, true);
+  const libraryTops = libTops(repoRoot);
+  const libraries = [libTopNames(repoRoot).sort(), libraryTops.slice().sort()];
+  const fingerprint = syncFingerprint(table, libraries);
+  const readyFile = path.join(kn, SYNC_READY_FILE);
   const stamp = readJson(keilStampPath(repoRoot), { files: {} });
-  const dirty = changedRels(repoRoot);
+  const topDirs = listTopDirs(repoRoot, libraryTops);
+  const snapshot = sourceSnapshot(repoRoot, stamp, isLibraryPath, topDirs);
+  const dirty = snapshot.dirty;
   const head = currentHead(repoRoot);
   const branch = currentBranch(repoRoot);
-  const full = stamp.head !== head || stamp.branch !== branch || !stamp.files;
+  const full = stamp.version !== SYNC_VERSION || stamp.fingerprint !== fingerprint
+    || stamp.complete !== true || !fs.existsSync(readyFile)
+    || stamp.head !== head || stamp.branch !== branch || !stamp.files || !stamp.targets;
+  const targetCheckStart = process.hrtime.bigint();
+  // Check targets as well as sources: build tools can overwrite copied inputs.
+  if (!full) {
+    for (const rel of Object.keys(stamp.files || {})) {
+      if (isLibraryPath(rel)) continue;
+      const current = fileStamp(path.join(kn, rel));
+      if (!current || current !== stamp.targets[rel]) dirty.add(rel);
+    }
+  }
+  const timings = { gitListMs: snapshot.gitListMs, sourceScanMs: snapshot.sourceScanMs,
+    targetCheckMs: Number(process.hrtime.bigint() - targetCheckStart) / 1e6 };
   const clean = !full && dirty.size === 0;
 
   let junctioned = 0;
-  for (const top of libTops(repoRoot)) {
+  if (!clean) {
+    try { fs.unlinkSync(readyFile); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  }
+  for (const top of libraryTops) {
     const src = path.join(repoRoot, top);
     const dst = path.join(kn, top);
     if (!fs.existsSync(src)) continue;
@@ -292,7 +368,41 @@ function syncKeilTree(repoRoot, emit) {
     junctioned += 1;
   }
 
-  const nextStamp = { head: head, branch: branch, files: {} };
+  // Matching source and target snapshots permit the fast path.
+  if (clean && stamp.complete === true && fs.existsSync(readyFile)) {
+    const skippedAll = Object.keys(stamp.files || {}).length;
+    const msg = 'keil-native synced: cache hit, skip ' + skippedAll + ', junction ' + junctioned;
+    log(msg);
+    recordPerf(repoRoot, 'zkz-native.syncKeilTree', {
+      ms: Number(process.hrtime.bigint() - perfStart) / 1e6,
+      written: 0,
+      skipped: skippedAll,
+      pruned: 0,
+      junctioned: junctioned,
+      dirty: dirty.size,
+      full: false,
+      cacheHit: true,
+      ...timings
+    });
+    return {
+      written: 0,
+      skipped: skippedAll,
+      pruned: 0,
+      junctioned: junctioned,
+      root: kn,
+      libWarnings: loadLibWarnings(repoRoot),
+      cacheHit: true,
+      timings
+    };
+  }
+
+  try { fs.unlinkSync(readyFile); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  const nextStamp = { version: SYNC_VERSION, head: head, branch: branch, files: {}, targets: {}, libraryFiles: snapshot.libraryFiles };
+  const incremental = !full && dirty.size > 0;
+  if (incremental && stamp.files) {
+    Object.keys(stamp.files).forEach((rel) => { nextStamp.files[rel] = stamp.files[rel]; });
+    Object.assign(nextStamp.targets, stamp.targets);
+  }
   let written = 0;
   let skipped = 0;
   let pruned = 0;
@@ -303,28 +413,35 @@ function syncKeilTree(repoRoot, emit) {
     else if (kind === 'pruned') pruned += 1;
   };
 
-  if (clean && stamp.files) {
+  if (incremental) {
+    // Reuse entries whose current metadata matches the previous build.
+    for (const rel of dirty) {
+      tally(syncOne(repoRoot, kn, table, stamp, nextStamp, rel, false, dirty, isLibraryPath));
+    }
+  } else if (clean && stamp.files) {
     const rels = new Set(Object.keys(stamp.files));
     collectProjectRels(repoRoot).forEach((rel) => rels.add(rel));
     for (const rel of rels) {
-      tally(syncOne(repoRoot, kn, table, stamp, nextStamp, rel, false, dirty));
+      tally(syncOne(repoRoot, kn, table, stamp, nextStamp, rel, false, dirty, isLibraryPath));
     }
   } else {
-    for (const top of listTopDirs(repoRoot)) {
+    for (const top of topDirs) {
       const files = [];
       walkFiles(repoRoot, top, files);
-      for (const rel of files) tally(syncOne(repoRoot, kn, table, stamp, nextStamp, rel, full, dirty));
+      for (const rel of files) tally(syncOne(repoRoot, kn, table, stamp, nextStamp, rel, full, dirty, isLibraryPath));
     }
     for (const rel of collectProjectRels(repoRoot)) {
-      tally(syncOne(repoRoot, kn, table, stamp, nextStamp, rel, full, dirty));
+      tally(syncOne(repoRoot, kn, table, stamp, nextStamp, rel, full, dirty, isLibraryPath));
     }
   }
 
   if (stamp.files) {
     for (const rel of Object.keys(stamp.files)) {
       if (nextStamp.files[rel]) continue;
+      // 增量同步已按 dirty 路径处理删除；其它路径可继续保留。
+      if (incremental) continue;
       // 库路径由 junction 管理，绝不 prune（历史 stamp 里若残留库条目，prune 会把 junction/目录内容删空）。
-      if (isLibRel(repoRoot, rel)) continue;
+      if (isLibraryPath(rel)) continue;
       const dst = path.join(kn, rel);
       try {
         if (fs.existsSync(dst) && fs.statSync(dst).isFile()) {
@@ -336,36 +453,59 @@ function syncKeilTree(repoRoot, emit) {
   }
 
   let removed = 0;
-  for (const top of listTopDirs(repoRoot)) {
-    removed += pruneMissing(repoRoot, kn, top);
+  if (!incremental) {
+    for (const top of topDirs) {
+      removed += pruneMissing(repoRoot, kn, top);
+    }
   }
   pruned += removed;
 
-  writeJson(keilStampPath(repoRoot), nextStamp);
+  nextStamp.complete = true;
+  nextStamp.fingerprint = syncFingerprint(table, libraries);
   const libDirty = [];
   dirty.forEach((rel) => {
-    if (isSourceExt(rel) && isLibRel(repoRoot, rel)) libDirty.push(rel);
+    if (isSourceExt(rel) && isLibraryPath(rel)) libDirty.push(rel);
   });
   let libWarnings = [];
   try {
-    libWarnings = inspectLibEncoding(repoRoot, libDirty, { mode: 'worktree', persist: true });
+    const checked = new Set(libDirty);
+    const previous = loadLibWarnings(repoRoot).filter((item) => snapshot.libraryFiles[item.rel] && !checked.has(item.rel));
+    libWarnings = previous.concat(inspectLibEncoding(repoRoot, libDirty, { mode: 'worktree', persist: false }));
+    saveLibWarnings(repoRoot, libWarnings);
   } catch (e) {
+    // Keep the previous library metadata so a failed check is retried.
+    nextStamp.libraryFiles = stamp.libraryFiles || {};
+    libWarnings = loadLibWarnings(repoRoot);
     log('lib encoding inspect failed: ' + String(e && e.message ? e.message : e));
   }
   if (libWarnings.length) {
     log('lib encoding warnings: ' + libWarnings.length);
     libWarnings.forEach((it) => log('  ' + formatLibWarning(it)));
   }
+  writeJson(keilStampPath(repoRoot), nextStamp);
+  try { fs.writeFileSync(readyFile, String(Date.now()) + '\n', 'utf8'); } catch (_) { /* cache marker is optional */ }
   const msg = 'keil-native synced: write ' + written + ', skip ' + skipped +
     ', prune ' + pruned + ', junction ' + junctioned;
   log(msg);
+  recordPerf(repoRoot, 'zkz-native.syncKeilTree', {
+    ms: Number(process.hrtime.bigint() - perfStart) / 1e6,
+    written: written,
+    skipped: skipped,
+    pruned: pruned,
+    junctioned: junctioned,
+    dirty: dirty.size,
+    full: full,
+    incremental: incremental,
+    ...timings
+  });
   return {
     written: written,
     skipped: skipped,
     pruned: pruned,
     junctioned: junctioned,
     root: kn,
-    libWarnings: libWarnings
+    libWarnings: libWarnings,
+    timings
   };
 }
 

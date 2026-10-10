@@ -2,7 +2,7 @@
 
 const { slashRel, isSourceExt, isLibRel } = require('./paths');
 const { loadTable } = require('./enc_table');
-const { detectKind, applyClean, decodeCp936, parseMapped, roundtripOk, hasNonAscii } = require('./encoding');
+const { detectKind, applyClean, decodeCp936, parseMapped, roundtripOk } = require('./encoding');
 const { isForbiddenStage, loadConfigPaths } = require('./config_paths');
 const { gitText, catFileBatch } = require('./git_exec');
 const { parseNameStatusZ } = require('./git_status');
@@ -26,9 +26,6 @@ function evaluateStagedBlob(rel, data, mapped) {
         return { error: rel + ': 新文件不是合法 GBK (' + (e && e.message ? e.message : e) + ')' };
       }
       return {};
-    }
-    if ((kind === 'Utf8' || kind === 'Utf8Bom') && hasNonAscii(data)) {
-      return { error: rel + ': 新文件含中文，应存为 GBK，请重新 git add' };
     }
     return {};
   }

@@ -59,6 +59,39 @@ function test(name, fn) {
   }
 }
 
+test('settings cache reuses reads and invalidates without leaking mutations', () => {
+  const settings = require('../../shared/zkz_settings');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-settings-cache-'));
+  const original = fs.readFileSync;
+  let reads = 0;
+  try {
+    settings.set(root, 'keil', 'flavor', 'f429');
+    const file = settings.settingsFile(root);
+    fs.readFileSync = function (p, ...args) {
+      if (p === file) reads++;
+      return original.call(this, p, ...args);
+    };
+    assert.strictEqual(settings.get(root, 'keil', 'flavor'), 'f429');
+    assert.strictEqual(settings.get(root, 'keil', 'flavor'), 'f429');
+    assert.strictEqual(reads, 1);
+    settings.load(root).keil.flavor = 'bad';
+    settings.get(root, 'native', 'paths').push('bad');
+    assert.strictEqual(settings.get(root, 'keil', 'flavor'), 'f429');
+    assert.ok(!settings.get(root, 'native', 'paths').includes('bad'));
+    fs.writeFileSync(file, JSON.stringify({ keil: { flavor: 'h750', extra: 1 } }));
+    assert.strictEqual(settings.get(root, 'keil', 'flavor'), 'h750');
+    settings.set(root, 'keil', 'flavor', 'f429');
+    assert.strictEqual(settings.get(root, 'keil', 'flavor'), 'f429');
+    fs.unlinkSync(file);
+    assert.strictEqual(settings.get(root, 'keil', 'flavor', 'missing'), 'missing');
+    fs.writeFileSync(file, 'invalid');
+    assert.deepStrictEqual(settings.load(root), {});
+  } finally {
+    fs.readFileSync = original;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('parseIntelHex checksum and length', () => {
   const recs = parseIntelHex([
     ':0200000490006A',

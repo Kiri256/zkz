@@ -31,7 +31,9 @@ const RUN_FILE_NAMES = [
   'zkz-native.log',
   'native-status.json',
   'compile-commands-stamp.json',
-  'macro-table.json'
+  'compile-commands-cache.json',
+  'macro-table.json',
+  'performance.jsonl'
 ];
 
 const relocatedRoots = new Set();
@@ -180,7 +182,7 @@ function listsStamp(p) {
   if (!p) return 'missing';
   try {
     const st = fs.statSync(p);
-    return p + '|' + st.mtimeMs + '|' + st.size;
+    return p + '|' + st.mtimeMs + '|' + st.ctimeMs + '|' + st.size;
   } catch (_) {
     return p + '|missing';
   }
@@ -249,6 +251,7 @@ function rememberLibTops(repoRoot) {
   }
   const next = { stamp: stamp, all: all, names: names, set: new Set(all.map((s) => s.toLowerCase())) };
   gLibCache.set(repoRoot, next);
+  if (gLibCache.size > 8) gLibCache.delete(gLibCache.keys().next().value);
   return next;
 }
 
@@ -266,6 +269,12 @@ function isLibRel(repoRoot, rel) {
   const hit = rememberLibTops(repoRoot);
   if (hit && hit.set) return hit.set.has(top.toLowerCase());
   return DEFAULT_LIB_TOPS.map((s) => s.toLowerCase()).indexOf(top.toLowerCase()) >= 0;
+}
+
+function createLibMatcher(repoRoot, refresh) {
+  if (refresh) gLibCache.delete(repoRoot);
+  const set = new Set(rememberLibTops(repoRoot).set);
+  return (rel) => set.has(slashRel(rel).split('/')[0].toLowerCase());
 }
 
 function findRepoRoot(startDir) {
@@ -396,6 +405,7 @@ module.exports = {
   listJunctionTops,
   libTops,
   isLibRel,
+  createLibMatcher,
   findRepoRoot,
   sleepSync,
   atomicWriteFile,

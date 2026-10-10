@@ -21,6 +21,7 @@ python .\extensions\package_zkz_native.py
 | 真源、`zkz-native`、编码和日常协作边界 | [`docs/workspace-model.md`](docs/workspace-model.md) |
 | PowerShell/Python 工具的用途和参数 | [`docs/cli.md`](docs/cli.md) |
 | F429 Boot、J-Link 和恢复顺序 | [`docs/f429-boot-jlink.md`](docs/f429-boot-jlink.md) |
+| 整个项目性能优化计划 | [`docs/performance-optimization-plan.md`](docs/performance-optimization-plan.md) |
 | 扩展打包和扩展间调用 | [`extensions/README.md`](extensions/README.md) |
 | 真源 UTF-8 过滤器、编烧树 | [`extensions/zkz-native/README.md`](extensions/zkz-native/README.md) |
 | 宏表、`#if` 折叠、clangd、FFFD | [`extensions/zkz-code/README.md`](extensions/zkz-code/README.md) |

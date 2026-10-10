@@ -60,15 +60,13 @@ function isWorktreeClean(repoRoot) {
 }
 
 function currentHead(repoRoot) {
-  const r = git(repoRoot, ['rev-parse', 'HEAD'], { allowFail: true });
-  if (r.status !== 0) return '';
-  return String(r.stdout || '').trim();
+  return readHeadOid(repoRoot);
 }
 
 function currentBranch(repoRoot) {
-  const r = git(repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD'], { allowFail: true });
-  if (r.status !== 0) return '';
-  return String(r.stdout || '').trim();
+  const ref = readHeadName(repoRoot);
+  if (ref === 'detached') return ref;
+  return ref.indexOf('refs/heads/') === 0 ? ref.slice('refs/heads/'.length) : ref;
 }
 
 function listSourceFiles(repoRoot) {

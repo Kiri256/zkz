@@ -6,12 +6,20 @@ const { slashRel, tablePath, ensureZkz, isLibRel, formatLocalNow, atomicWriteJso
 const { acquireLock, releaseLock } = require('./lock');
 const { listSourceFiles, catFileBatch, currentHead, readHeadName, git } = require('./git_exec');
 const { parseNameStatusZ } = require('./git_status');
+const { record: recordPerf } = require('../../shared/perf');
 
 function emptyTable() {
   return Object.create(null);
 }
 
 const gTableCache = { root: '', mtime: 0, map: null, meta: null };
+
+function tableStamp(file) {
+  try {
+    const st = fs.statSync(file);
+    return [st.mtimeMs, st.ctimeMs, st.size].join('|');
+  } catch (_) { return 'missing'; }
+}
 
 function rememberTable(repoRoot, mtime, map, meta) {
   gTableCache.root = repoRoot;
@@ -22,8 +30,7 @@ function rememberTable(repoRoot, mtime, map, meta) {
 
 function loadTable(repoRoot) {
   const p = tablePath(repoRoot);
-  let mtime = 0;
-  try { mtime = fs.statSync(p).mtimeMs; } catch (_) { mtime = 0; }
+  const mtime = tableStamp(p);
   if (gTableCache.map && gTableCache.root === repoRoot && gTableCache.mtime === mtime) {
     return gTableCache.map;
   }
@@ -61,7 +68,7 @@ function noteTableRef(repoRoot, meta) {
   try {
     atomicWriteJson(tablePath(repoRoot), meta);
     if (gTableCache.root === repoRoot && gTableCache.meta === meta) {
-      try { gTableCache.mtime = fs.statSync(tablePath(repoRoot)).mtimeMs; } catch (_) { gTableCache.map = null; }
+      gTableCache.mtime = tableStamp(tablePath(repoRoot));
     }
   } catch (_) { /* ignore */ }
   return meta;
@@ -149,11 +156,20 @@ async function buildTableIncremental(repoRoot, from, to, skipLib) {
 }
 
 async function buildTable(repoRoot, opts) {
+  const perfStart = process.hrtime.bigint();
   const skipLib = !(opts && opts.includeLibs);
   const force = !!(opts && opts.force);
   if (!force && opts && opts.from && opts.to) {
     const hit = await buildTableIncremental(repoRoot, opts.from, opts.to, skipLib);
-    if (hit) return hit;
+    if (hit) {
+      recordPerf(repoRoot, 'zkz-native.buildEncodingTable', {
+        ms: Number(process.hrtime.bigint() - perfStart) / 1e6,
+        files: Object.keys(hit.files || {}).length,
+        incremental: true,
+        includeLibs: !skipLib
+      });
+      return hit;
+    }
   }
   const paths = listSourceFiles(repoRoot).map(slashRel).filter((p) => {
     if (skipLib && isLibRel(repoRoot, p)) return false;
@@ -162,6 +178,12 @@ async function buildTable(repoRoot, opts) {
   const files = emptyTable();
   await fillKinds(repoRoot, files, paths);
   const meta = saveTable(repoRoot, files);
+  recordPerf(repoRoot, 'zkz-native.buildEncodingTable', {
+    ms: Number(process.hrtime.bigint() - perfStart) / 1e6,
+    files: Object.keys(files).length,
+    incremental: false,
+    includeLibs: !skipLib
+  });
   return { files: files, meta: meta, counts: countByKind(files) };
 }
 

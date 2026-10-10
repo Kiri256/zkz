@@ -76,12 +76,12 @@ def main(name, files):
     with open(pkg_json, "r", encoding="utf-8") as f:
         meta = json.load(f)
     version = bump_patch(meta.get("version") or "0.0.0")
-    write_version(pkg_json, version)
     out_vsix = os.path.join(ROOT, "%s-%s.vsix" % (name, version))
 
     stage = tempfile.mkdtemp(prefix="zkz-vsix-")
     try:
         _copy(pkg_json, os.path.join(stage, "package.json"))
+        write_version(os.path.join(stage, "package.json"), version)
         _copy(readme, os.path.join(stage, "README.md"))
         license_copied = False
         for license_name in ("LICENSE", "LICENSE.md", "LICENSE.txt"):
@@ -125,10 +125,14 @@ def main(name, files):
             "--allow-missing-repository",
             "--out", out_vsix,
         ]
-        print("packing %s %s" % (name, version))
+        print("packing %s %s" % (name, version), flush=True)
         r = subprocess.run(cmd, cwd=stage)
         if r.returncode != 0:
             return r.returncode
+        if not os.path.isfile(out_vsix):
+            sys.stderr.write("packaging succeeded but VSIX is missing: %s\n" % out_vsix)
+            return 1
+        write_version(pkg_json, version)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 

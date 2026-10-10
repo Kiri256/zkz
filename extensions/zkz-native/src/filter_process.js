@@ -2,8 +2,8 @@
 
 const { loadTable } = require('./enc_table');
 const { smudge, clean } = require('./filter_core');
-const { findRepoRoot } = require('./paths');
-const { PktReader, encodePacket, encodeFlush, encodeContent, writeAll } = require('./pktline');
+const { findRepoRoot, createLibMatcher } = require('./paths');
+const { PktReader, encodePacket, encodeFlush, writeContent, writeAll } = require('./pktline');
 const { recordFilterFail, resetFilterFail, recordHandshakeReject } = require('./observe');
 
 function setBlocking() {
@@ -47,8 +47,10 @@ async function handshake(reader, out, repoRoot) {
 async function writeSuccess(out, body) {
   await writeAll(out, Buffer.concat([
     encodePacket(Buffer.from('status=success\n', 'utf8')),
-    encodeFlush(),
-    encodeContent(body),
+    encodeFlush()
+  ]));
+  await writeContent(out, body);
+  await writeAll(out, Buffer.concat([
     encodeFlush(),
     encodePacket(Buffer.from('status=success\n', 'utf8')),
     encodeFlush()
@@ -63,7 +65,7 @@ async function writeError(out, msg) {
   return msg;
 }
 
-async function handleOne(reader, out, table, repoRoot) {
+async function handleOne(reader, out, table, repoRoot, state) {
   const head = await reader.readTextHeaders();
   if (head.eof) return false;
   const command = String(head.headers.command || '');
@@ -72,15 +74,19 @@ async function handleOne(reader, out, table, repoRoot) {
   if (body.eof && !body.data.length && !command) return false;
   try {
     let result;
-    if (command === 'smudge') result = smudge(pathname, body.data, table, repoRoot);
-    else if (command === 'clean') result = clean(pathname, body.data, table, repoRoot);
+    if (command === 'smudge') result = smudge(pathname, body.data, table, repoRoot, state.isLibraryPath);
+    else if (command === 'clean') result = clean(pathname, body.data, table, repoRoot, state.isLibraryPath);
     else throw new Error('unknown command: ' + command);
     await writeSuccess(out, result);
-    resetFilterFail(repoRoot);
+    if (!state.filterFailReset) {
+      resetFilterFail(repoRoot);
+      state.filterFailReset = true;
+    }
   } catch (e) {
     const msg = pathname + ': ' + String(e && e.message ? e.message : e);
     try { process.stderr.write('zkz-native filter error ' + command + ' ' + msg + '\n'); } catch (_) { /* ignore */ }
     recordFilterFail(repoRoot, command + ' ' + msg);
+    state.filterFailReset = false;
     try { await writeError(out, msg); } catch (_2) { /* protocol already broken */ }
   }
   return true;
@@ -92,8 +98,10 @@ async function main() {
   const repoRoot = findRepoRoot(process.env.GIT_WORK_TREE || process.cwd());
   const out = process.stdout;
   if (!await handshake(reader, out, repoRoot)) return;
+  const table = loadTable(repoRoot);
+  const state = { filterFailReset: false, isLibraryPath: createLibMatcher(repoRoot, true) };
   for (; ;) {
-    const more = await handleOne(reader, out, loadTable(repoRoot), repoRoot);
+    const more = await handleOne(reader, out, table, repoRoot, state);
     if (!more) break;
   }
 }

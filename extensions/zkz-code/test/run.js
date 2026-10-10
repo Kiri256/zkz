@@ -219,6 +219,97 @@ test('uvproj target becomes compile_commands', () => {
   ]);
 });
 
+test('Keil XML supports attributes, comments, CDATA, numeric entities and nested targets', () => {
+  const { buildCompileCommands } = require('../src/compile_commands');
+  const xml = '<Project><Targets><Target id="flash"><TargetName>Fl&#97;sh</TargetName>' +
+    '<TargetOption><DebugOption><Target><TargetName>Debug</TargetName></Target></DebugOption>' +
+    '<TargetArmAds><Cads><VariousControls><Define><![CDATA[VALUE=1,FLAG]]></Define>' +
+    '<IncludePath/></VariousControls></Cads></TargetArmAds></TargetOption>' +
+    '<Groups><Group><Files><!-- <File><FileType>1</FileType><FilePath>fake.c</FilePath></File> -->' +
+    '<File id="main"><FileType>1</FileType><FilePath>main&#46;c</FilePath></File>' +
+    '</Files></Group></Groups></Target></Targets></Project>';
+  const result = buildCompileCommands(xml, 'C:\\project', 'Flash');
+  assert.strictEqual(result.entries.length, 1);
+  assert.strictEqual(result.entries[0].file, 'C:\\project\\main.c');
+  assert.deepStrictEqual(result.entries[0].arguments, ['clang', '-DVALUE=1', '-DFLAG']);
+  assert.throws(() => buildCompileCommands(xml.replace('</Files>', '</Broken>'), 'C:\\project', 'Flash'),
+    (err) => err.code === 'ZKZ_INVALID_XML');
+  assert.throws(() => buildCompileCommands(xml, 'C:\\project', 'Debug'),
+    (err) => err.code === 'ZKZ_NO_TARGET');
+});
+
+test('compile cache handles memory hits, relocation, XML changes and corrupt disk data', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-cc-cache-'));
+  const script = async function () {
+    const assert = require('assert');
+    const fs = require('fs');
+    const path = require('path');
+    const root = process.argv[1];
+    const modulePath = process.argv[2];
+    const cc = require(modulePath);
+    const mdk = path.join(root, 'Project', 'MDK-ARM(uV4)');
+    fs.mkdirSync(mdk, { recursive: true });
+    const project = path.join(mdk, 'b_01.uvproj');
+    const xml = '<Project><Targets><Target><TargetName>Flash</TargetName><Groups><Group><Files><File><FileType>1</FileType><FilePath>../../User/main.c</FilePath></File></Files></Group></Groups></Target></Targets></Project>';
+    fs.writeFileSync(project, xml);
+    await cc.refreshCompileCommands(root, { force: true });
+    const cache = path.join(root, '.zkz', 'run', 'compile-commands-cache.json');
+    const originalRead = fs.readFileSync;
+    const originalWrite = fs.writeFileSync;
+    let outputWrites = 0;
+    fs.writeFileSync = function (p, ...args) {
+      if (path.basename(p) === 'compile_commands.json') outputWrites++;
+      return originalWrite.call(this, p, ...args);
+    };
+    let reads = 0;
+    fs.readFileSync = function (p, ...args) {
+      if (p === cache) reads++;
+      return originalRead.call(this, p, ...args);
+    };
+    await cc.refreshCompileCommands(root, { force: true });
+    fs.readFileSync = originalRead;
+    fs.writeFileSync = originalWrite;
+    assert.strictEqual(reads, 0);
+    assert.strictEqual(outputWrites, 0);
+    const output = path.join(root, 'compile_commands.json');
+    fs.writeFileSync(output, 'corrupted');
+    await cc.refreshCompileCommands(root, { force: true });
+    assert.strictEqual(JSON.parse(fs.readFileSync(output))[0].file, path.join(root, 'User', 'main.c'));
+    fs.unlinkSync(output);
+    await cc.refreshCompileCommands(root, { force: true });
+    assert.ok(fs.existsSync(output));
+    const moved = path.join(root, 'moved');
+    const movedMdk = path.join(moved, 'Project', 'MDK-ARM(uV4)');
+    const movedRun = path.join(moved, '.zkz', 'run');
+    fs.mkdirSync(movedMdk, { recursive: true });
+    fs.mkdirSync(movedRun, { recursive: true });
+    fs.writeFileSync(path.join(movedMdk, 'b_01.uvproj'), xml);
+    fs.copyFileSync(cache, path.join(movedRun, 'compile-commands-cache.json'));
+    await cc.refreshCompileCommands(moved, { force: true });
+    let entries = JSON.parse(fs.readFileSync(path.join(moved, 'compile_commands.json')));
+    assert.strictEqual(entries[0].directory, movedMdk);
+    assert.strictEqual(entries[0].file, path.join(moved, 'User', 'main.c'));
+    fs.writeFileSync(project, xml.replace('main.c', 'changed.c'));
+    await cc.refreshCompileCommands(root, { force: true });
+    entries = JSON.parse(fs.readFileSync(path.join(root, 'compile_commands.json')));
+    assert.strictEqual(entries[0].file, path.join(root, 'User', 'changed.c'));
+    const row = JSON.parse(fs.readFileSync(cache));
+    row.text = 'invalid JSON';
+    fs.writeFileSync(cache, JSON.stringify(row));
+    delete require.cache[require.resolve(modulePath)];
+    await require(modulePath).refreshCompileCommands(root, { force: true });
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(root, 'compile_commands.json')))[0].file, entries[0].file);
+  };
+  try {
+    const r = spawnSync(process.execPath, ['-e', '(' + script.toString() + ')().catch(e => { console.error(e); process.exitCode = 1; })', root, require.resolve('../src/compile_commands')], { windowsHide: true, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, r.stderr);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('index snapshot stays put across a save', () => {
   const { retainIndexSnapshot } = require('../src/macros');
   let indexed = {};

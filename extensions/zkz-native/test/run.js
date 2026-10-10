@@ -18,6 +18,305 @@ function test(name, fn) {
   }
 }
 
+test('porcelain rename preserves both full paths and literal arrow names', () => {
+  const { parsePorcelainZ } = require('../src/git_status');
+  assert.deepStrictEqual(Array.from(parsePorcelainZ('R  User/new.c\0User/old.c\0 M User/a -> b.c\0')), ['User/new.c', 'User/old.c', 'User/a -> b.c']);
+});
+
+test('library matcher snapshot avoids file I/O and refreshes per operation', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const { createLibMatcher } = require('../src/paths');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-lib-cache-'));
+  try {
+    fs.mkdirSync(path.join(root, '.zkz'));
+    const file = path.join(root, '.zkz', 'workspace_lists.json');
+    fs.writeFileSync(file, JSON.stringify({ libraryDirNames: ['Old'] }));
+    const first = createLibMatcher(root);
+    fs.writeFileSync(file, JSON.stringify({ libraryDirNames: ['NewLibrary'] }));
+    const second = createLibMatcher(root);
+    assert.ok(first('Old/a.c'));
+    assert.ok(!first('NewLibrary/a.c'));
+    assert.ok(second('NewLibrary/a.c'));
+    const stat = fs.statSync;
+    try {
+      fs.statSync = () => { throw new Error('unexpected disk access'); };
+      assert.ok(first('OLD\\a.c'));
+    } finally { fs.statSync = stat; }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('content framing preserves multi-packet binary payload', () => {
+  const bytes = Buffer.alloc(MAX_PAYLOAD * 2 + 11);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = i % 256;
+  const encoded = encodeContent(bytes);
+  let pos = 0;
+  const parts = [];
+  while (pos < encoded.length) {
+    const size = parseInt(encoded.toString('ascii', pos, pos + 4), 16);
+    assert.ok(size <= MAX_PAYLOAD + 4);
+    parts.push(encoded.subarray(pos + 4, pos + size));
+    pos += size;
+  }
+  assert.ok(Buffer.concat(parts).equals(bytes));
+});
+
+test('sync restores a reverted edit even when a different file stays dirty', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const { spawnSync } = require('child_process');
+  const { syncKeilTree } = require('../src/keil_tree');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-sync-undo-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: root, windowsHide: true });
+    assert.strictEqual(r.status, 0, String(r.stderr));
+  };
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'test@example.com']);
+    git(['config', 'user.name', 'test']);
+    git(['config', 'core.autocrlf', 'false']);
+    fs.appendFileSync(path.join(root, '.git', 'info', 'exclude'), '\n.zkz/\n');
+    fs.mkdirSync(path.join(root, 'User'));
+    const a = path.join(root, 'User', 'a.c');
+    const b = path.join(root, 'User', 'b.c');
+    fs.writeFileSync(a, 'int a;\n');
+    fs.writeFileSync(b, 'int b;\n');
+    git(['add', 'User']);
+    git(['commit', '-qm', 'base']);
+    syncKeilTree(root);
+    fs.writeFileSync(a, 'int changed;\n');
+    syncKeilTree(root);
+    git(['restore', '--', 'User/a.c']);
+    fs.writeFileSync(b, 'int other;\n');
+    syncKeilTree(root);
+    const kn = path.join(root, '.zkz', 'keil-native', 'User');
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'a.c'), 'utf8'), 'int a;\n');
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'b.c'), 'utf8'), 'int other;\n');
+    git(['restore', '--', 'User/b.c']);
+    syncKeilTree(root);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'b.c'), 'utf8'), 'int b;\n');
+    assert.strictEqual(syncKeilTree(root).cacheHit, true);
+    const target = path.join(kn, 'a.c');
+    const targetTime = fs.statSync(target).mtime;
+    fs.writeFileSync(target, 'int z;\n');
+    fs.utimesSync(target, targetTime, targetTime);
+    assert.strictEqual(syncKeilTree(root).written, 1);
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'int a;\n');
+    assert.strictEqual(syncKeilTree(root).cacheHit, true);
+    fs.unlinkSync(path.join(kn, 'a.c'));
+    assert.notStrictEqual(syncKeilTree(root).cacheHit, true);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'a.c'), 'utf8'), 'int a;\n');
+    fs.rmSync(kn, { recursive: true });
+    syncKeilTree(root);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'a.c'), 'utf8'), 'int a;\n');
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'b.c'), 'utf8'), 'int b;\n');
+    fs.unlinkSync(path.join(kn, 'a.c'));
+    fs.writeFileSync(b, 'int dirty;\n');
+    syncKeilTree(root);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'a.c'), 'utf8'), 'int a;\n');
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'b.c'), 'utf8'), 'int dirty;\n');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('sync invalidates configuration and version changes and keeps project support files', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const { spawnSync } = require('child_process');
+  const { syncKeilTree } = require('../src/keil_tree');
+  const { saveTable } = require('../src/enc_table');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-sync-config-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: root, windowsHide: true });
+    assert.strictEqual(r.status, 0, String(r.stderr));
+  };
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'test@example.com']);
+    git(['config', 'user.name', 'test']);
+    git(['config', 'core.autocrlf', 'false']);
+    fs.appendFileSync(path.join(root, '.git', 'info', 'exclude'), '\n.zkz/\n');
+    fs.mkdirSync(path.join(root, 'User'));
+    fs.writeFileSync(path.join(root, 'User', 'a.c'), '// \u4e2d\u6587\n');
+    const support = ['Project/Obj/link.sct', 'Project/Flash/setup.ini', 'H750/Projects/MDK-ARM/Obj/link.scf'];
+    for (const rel of support.concat(['Project/Obj/output.o', 'User/Obj/skip.sct'])) {
+      fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      fs.writeFileSync(path.join(root, rel), 'original');
+    }
+    git(['add', '.']);
+    git(['commit', '-qm', 'base']);
+    saveTable(root, { 'User/a.c': 'Utf8' });
+    const kn = path.join(root, '.zkz', 'keil-native');
+    syncKeilTree(root);
+    assert.strictEqual(syncKeilTree(root).cacheHit, true);
+    for (const rel of support) assert.strictEqual(fs.readFileSync(path.join(kn, rel), 'utf8'), 'original');
+    assert.ok(!fs.existsSync(path.join(kn, 'Project/Obj/output.o')));
+    assert.ok(!fs.existsSync(path.join(kn, 'User/Obj/skip.sct')));
+    saveTable(root, { 'User/a.c': 'Gbk' });
+    assert.notStrictEqual(syncKeilTree(root).cacheHit, true);
+    assert.ok(fs.readFileSync(path.join(kn, 'User/a.c')).equals(encodeCp936('// \u4e2d\u6587\n')));
+    assert.strictEqual(syncKeilTree(root).cacheHit, true);
+    const stampFile = path.join(root, '.zkz', 'run', 'keil-native-stamp.json');
+    const stamp = JSON.parse(fs.readFileSync(stampFile));
+    stamp.version = -1;
+    fs.writeFileSync(stampFile, JSON.stringify(stamp));
+    assert.notStrictEqual(syncKeilTree(root).cacheHit, true);
+    fs.writeFileSync(path.join(kn, 'User/a.c'), 'partial failed sync');
+    fs.unlinkSync(path.join(kn, '.zkz-sync-ready'));
+    syncKeilTree(root);
+    assert.ok(fs.readFileSync(path.join(kn, 'User/a.c')).equals(encodeCp936('// \u4e2d\u6587\n')));
+    fs.writeFileSync(path.join(root, support[0]), 'updated');
+    syncKeilTree(root);
+    assert.strictEqual(fs.readFileSync(path.join(kn, support[0]), 'utf8'), 'updated');
+    fs.unlinkSync(path.join(root, support[0]));
+    syncKeilTree(root);
+    assert.ok(!fs.existsSync(path.join(kn, support[0])));
+    fs.writeFileSync(path.join(root, '.zkz', 'workspace_lists.json'), JSON.stringify({ libraryDirNames: ['User'] }));
+    assert.notStrictEqual(syncKeilTree(root).cacheHit, true);
+    assert.ok(fs.lstatSync(path.join(kn, 'User')).isSymbolicLink());
+    fs.writeFileSync(path.join(root, '.zkz', 'workspace_lists.json'), JSON.stringify({ libraryDirNames: [] }));
+    syncKeilTree(root);
+    assert.ok(!fs.lstatSync(path.join(kn, 'User')).isSymbolicLink());
+    // A configured library created later must be linked on the next operation.
+    fs.writeFileSync(path.join(root, '.zkz', 'workspace_lists.json'), JSON.stringify({ libraryDirNames: ['Later'] }));
+    syncKeilTree(root);
+    fs.mkdirSync(path.join(root, 'Later'));
+    syncKeilTree(root);
+    assert.ok(fs.lstatSync(path.join(kn, 'Later')).isSymbolicLink());
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('source snapshots handle staged edits, restored timestamps, new directories and library warnings', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const { spawnSync } = require('child_process');
+  const { syncKeilTree } = require('../src/keil_tree');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-sync-snapshot-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: root, windowsHide: true });
+    assert.strictEqual(r.status, 0, String(r.stderr));
+  };
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'test@example.com']);
+    git(['config', 'user.name', 'test']);
+    git(['config', 'core.autocrlf', 'false']);
+    fs.appendFileSync(path.join(root, '.git', 'info', 'exclude'), '\n.zkz/\nProject/Obj/\n');
+    fs.mkdirSync(path.join(root, 'User'));
+    fs.mkdirSync(path.join(root, 'Libraries'));
+    const file = path.join(root, 'User', 'a.c');
+    fs.writeFileSync(file, 'int a;\n');
+    const original = new Date(1000000000000);
+    fs.utimesSync(file, original, original);
+    const lib = path.join(root, 'Libraries', 'a.c');
+    const libBytes = encodeCp936('// \u4e2d\u6587\n');
+    fs.writeFileSync(lib, libBytes);
+    git(['add', '.']);
+    git(['commit', '-qm', 'base']);
+    const kn = path.join(root, '.zkz', 'keil-native');
+    syncKeilTree(root);
+    assert.strictEqual(syncKeilTree(root).cacheHit, true);
+    fs.writeFileSync(file, 'int b;\n');
+    fs.utimesSync(file, original, original);
+    git(['add', '--renormalize', '--', 'User/a.c']);
+    assert.strictEqual(syncKeilTree(root).written, 1);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'User/a.c'), 'utf8'), 'int b;\n');
+    // A staged change whose source is already copied must not be rewritten.
+    assert.strictEqual(syncKeilTree(root).cacheHit, true);
+    git(['restore', '--staged', '--worktree', '--', 'User/a.c']);
+    assert.strictEqual(syncKeilTree(root).written, 1);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'User/a.c'), 'utf8'), 'int a;\n');
+    fs.mkdirSync(path.join(root, 'User', 'new dir'));
+    fs.writeFileSync(path.join(root, 'User', 'new dir', 'new file.c'), 'int new_file;\n');
+    syncKeilTree(root);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'User/new dir/new file.c'), 'utf8'), 'int new_file;\n');
+    fs.renameSync(path.join(root, 'User/new dir/new file.c'), path.join(root, 'User/new dir/renamed.c'));
+    syncKeilTree(root);
+    assert.ok(!fs.existsSync(path.join(kn, 'User/new dir/new file.c')));
+    assert.ok(fs.existsSync(path.join(kn, 'User/new dir/renamed.c')));
+    fs.mkdirSync(path.join(root, 'Project/Obj'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'Project/Obj/ignored.sct'), 'linker');
+    syncKeilTree(root);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'Project/Obj/ignored.sct'), 'utf8'), 'linker');
+    fs.writeFileSync(lib, '// \u4e2d\u6587\n', 'utf8');
+    const write = fs.writeFileSync;
+    try {
+      fs.writeFileSync = function (p, ...args) {
+        if (path.basename(p).startsWith('lib-encoding-warnings.json.')) throw new Error('warning write failed');
+        return write.call(this, p, ...args);
+      };
+      syncKeilTree(root);
+    } finally { fs.writeFileSync = write; }
+    // The failed warning write must not consume the library change snapshot.
+    assert.strictEqual(syncKeilTree(root).libWarnings.length, 1);
+    assert.strictEqual(syncKeilTree(root).libWarnings.length, 1);
+    fs.writeFileSync(file, 'int c;\n');
+    assert.strictEqual(syncKeilTree(root).libWarnings.length, 1);
+    fs.writeFileSync(lib, libBytes);
+    assert.strictEqual(syncKeilTree(root).libWarnings.length, 0);
+    const stat = fs.statSync;
+    try {
+      fs.statSync = function (p, ...args) {
+        if (p === file) { const err = new Error('source denied'); err.code = 'EACCES'; throw err; }
+        return stat.call(this, p, ...args);
+      };
+      assert.throws(() => syncKeilTree(root), /source denied/);
+    } finally { fs.statSync = stat; }
+    fs.rmSync(path.join(root, 'User'), { recursive: true });
+    syncKeilTree(root);
+    assert.ok(!fs.existsSync(path.join(kn, 'User/a.c')));
+    assert.ok(!fs.existsSync(path.join(kn, 'User/new dir/renamed.c')));
+    assert.strictEqual(syncKeilTree(root).cacheHit, true);
+    fs.writeFileSync(path.join(root, '.git', 'index'), 'broken index');
+    assert.throws(() => syncKeilTree(root), /git ls-files/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('performance log rotates and retains the latest record', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const { record } = require('../../shared/perf');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-perf-'));
+  try {
+    record(root, 'initial', {});
+    const file = path.join(root, '.zkz', 'run', 'performance.jsonl');
+    fs.truncateSync(file, 5 * 1024 * 1024);
+    record(root, 'latest', { ms: 1 });
+    assert.strictEqual(fs.statSync(file + '.1').size, 5 * 1024 * 1024);
+    assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).phase, 'latest');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('performance timestamp is readable Beijing time across date boundaries', () => {
+  const { formatTimestamp } = require('../../shared/perf');
+  assert.strictEqual(formatTimestamp(new Date('2026-10-10T03:28:30.532Z')), '2026-10-10 11:28:30.532 +0800');
+  assert.strictEqual(formatTimestamp(new Date('2026-10-10T18:00:00.007Z')), '2026-10-11 02:00:00.007 +0800');
+});
+
+test('encoding table cache detects replacements with a preserved mtime', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const { loadTable } = require('../src/enc_table');
+  const { tablePath } = require('../src/paths');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-table-stamp-'));
+  try {
+    const file = tablePath(root);
+    fs.writeFileSync(file, JSON.stringify({ files: { 'User/a.c': 'Gbk' } }));
+    const time = new Date(1000000000000);
+    fs.utimesSync(file, time, time);
+    assert.strictEqual(loadTable(root)['User/a.c'], 'Gbk');
+    fs.writeFileSync(file, JSON.stringify({ files: { 'User/a.c': 'Utf8Bom' } }));
+    fs.utimesSync(file, time, time);
+    assert.strictEqual(loadTable(root)['User/a.c'], 'Utf8Bom');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('detectKind ascii', () => {
   assert.strictEqual(detectKind(Buffer.from('int x;\n', 'utf8')), 'Ascii');
 });
@@ -76,12 +375,12 @@ test('Utf8Bom strip/restore', () => {
   assert.ok(clean('User/a.c', wt, table).equals(blob));
 });
 
-test('new file utf8 chinese is stored as gbk', () => {
+test('new file utf8 chinese stays utf8', () => {
   const wt = Buffer.from('/* \u65b0\u589e */\n', 'utf8');
   const out = clean('User/brand_new.c', wt, {});
-  assert.ok(out.equals(encodeCp936('/* \u65b0\u589e */\n')));
-  assert.strictEqual(kindForNewFile(wt), 'Gbk');
-  assert.strictEqual(detectKind(out), 'Gbk');
+  assert.ok(out.equals(wt));
+  assert.strictEqual(kindForNewFile(wt), 'Utf8');
+  assert.strictEqual(detectKind(out), 'Utf8');
 });
 
 test('new file ascii stays ascii', () => {
@@ -99,11 +398,62 @@ test('new file gbk is stored as gbk', () => {
   assert.strictEqual(kindForNewFile(wt), 'Gbk');
 });
 
-test('new file rejects text cp936 cannot store', () => {
+test('new file preserves text cp936 cannot store', () => {
   const wt = Buffer.from('emoji \u{1F600}\n', 'utf8');
-  let code = '';
-  try { clean('User/bad.c', wt, {}); } catch (e) { code = e.code; }
-  assert.strictEqual(code, 'ZKZ_ROUNDTRIP');
+  assert.ok(clean('User/new.c', wt, {}).equals(wt));
+});
+
+test('new source encodings survive git add and repeated Keil sync', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { writeSourceOrCopy } = require('../src/keil_tree');
+  const { loadTable } = require('../src/enc_table');
+  const { evaluateStagedBlob } = require('../src/precommit');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-new-encoding-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: dir, windowsHide: true });
+    assert.strictEqual(r.status, 0, String(r.stderr));
+    return r.stdout;
+  };
+  try {
+    git(['init', '-q']);
+    git(['config', 'core.autocrlf', 'false']);
+    const filter = require.resolve('../src/filter_process').replace(/\\/g, '/');
+    git(['config', 'filter.zkznative.process', '"' + process.execPath.replace(/\\/g, '/') + '" "' + filter + '"']);
+    git(['config', 'filter.zkznative.required', 'true']);
+    fs.writeFileSync(path.join(dir, '.git', 'info', 'attributes'), '*.c filter=zkznative -text\n');
+    fs.mkdirSync(path.join(dir, 'User'));
+    const text = '// \u4e2d\u6587\r\nint x;\r\n';
+    const variants = [
+      ['utf8', Buffer.from(text), 'Utf8+crlf'],
+      ['bom', Buffer.concat([UTF8_BOM, Buffer.from(text)]), 'Utf8Bom+crlf'],
+      ['gbk', encodeCp936(text), 'Gbk+crlf'],
+      ['ascii', Buffer.from('int x;\r\n'), 'Ascii+crlf'],
+      ['emoji', Buffer.from('// \u{1F600}\n'), 'Utf8']
+    ];
+    for (const [name, bytes, mapped] of variants) {
+      const rel = 'User/' + name + '.c';
+      fs.writeFileSync(path.join(dir, rel), bytes);
+      const kn = path.join(dir, '.zkz', 'keil-native');
+      for (let pass = 0; pass < 2; pass++) {
+        // Exercise both first Git add and first build, then the mapped path.
+        if (name !== 'utf8' || pass > 0) writeSourceOrCopy(dir, kn, loadTable(dir), rel);
+        git(['add', '--', rel]);
+        writeSourceOrCopy(dir, kn, loadTable(dir), rel);
+        const blob = git(['show', ':' + rel]);
+        assert.ok(blob.equals(bytes), name + ' staged bytes');
+        assert.ok(fs.readFileSync(path.join(kn, rel)).equals(bytes), name + ' Keil bytes');
+        assert.ok(fs.readFileSync(path.join(dir, rel)).equals(bytes), name + ' worktree bytes');
+        assert.strictEqual(loadTable(dir)[rel], mapped);
+        assert.ok(!evaluateStagedBlob(rel, blob, mapped).error);
+        assert.ok(!evaluateStagedBlob(rel, blob, undefined).error);
+      }
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('clean Gbk passthrough leftover repo bytes', () => {
@@ -199,12 +549,11 @@ test('precommit accepts new file stored as Gbk', () => {
   assert.ok(!r.error);
 });
 
-test('precommit rejects new utf8 chinese blob', () => {
+test('precommit accepts new utf8 chinese blob', () => {
   const { evaluateStagedBlob } = require('../src/precommit');
   const blob = Buffer.from('\u4e2d\u6587\n', 'utf8');
   const r = evaluateStagedBlob('core/new.c', blob, undefined);
-  assert.ok(r.error);
-  assert.ok(r.error.indexOf('GBK') >= 0);
+  assert.ok(!r.error);
 });
 
 
@@ -393,12 +742,37 @@ test('clean Gbk unencodable records sidecar', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-rt-'));
   const wt = Buffer.from('emoji \u{1F600}', 'utf8');
   const table = { 'User/a.c': 'Gbk' };
+  fs.mkdirSync(path.join(dir, 'User'));
+  fs.writeFileSync(path.join(dir, 'User', 'a.c'), wt);
   clean('User/a.c', wt, table, dir);
   const list = loadRoundtripFailures(dir);
   assert.strictEqual(list.length, 1);
   assert.strictEqual(list[0].rel, 'User/a.c');
   clearRoundtripFailure(dir, 'User/a.c');
   assert.strictEqual(loadRoundtripFailures(dir).length, 0);
+});
+
+test('roundtrip status ignores removed paths without deleting historical records', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const { recordRoundtripFailure, loadRoundtripFailures } = require('../src/observe');
+  const { roundtripFailPath } = require('../src/paths');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-rt-history-'));
+  try {
+    const rel = 'User/bsp/system_stm32f4xx.c';
+    const file = path.join(root, rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'broken');
+    recordRoundtripFailure(root, rel, new Error('cp936 roundtrip failed'));
+    assert.strictEqual(loadRoundtripFailures(root).length, 1);
+    fs.mkdirSync(path.join(root, 'driver', 'bsp'), { recursive: true });
+    fs.renameSync(file, path.join(root, 'driver', 'bsp', 'system_stm32f4xx.c'));
+    assert.strictEqual(loadRoundtripFailures(root).length, 0);
+    assert.ok(JSON.parse(fs.readFileSync(roundtripFailPath(root), 'utf8')).files[rel]);
+    fs.writeFileSync(file, 'broken again');
+    assert.strictEqual(loadRoundtripFailures(root).length, 1);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('config overlay seed/restore across branch loss', () => {
@@ -711,6 +1085,148 @@ async function runAsync() {
   }
 
   try {
+    const { PktReader } = require('../src/pktline');
+    const stream = new Readable({ read() { } });
+    const reader = new PktReader(stream);
+    const error = new Error('input transport failed');
+    const pending = assert.rejects(reader.readPacket(), (err) => err === error);
+    stream.destroy(error);
+    await pending;
+    await assert.rejects(reader.readPacket(), (err) => err === error);
+    assert.strictEqual(reader.buffered, 0);
+    ok('pkt-line input preserves stream errors for pending and future reads');
+  } catch (e) {
+    fail('pkt-line input preserves stream errors for pending and future reads', e);
+  }
+
+  try {
+    const { Writable } = require('stream');
+    const { writeContent, writeAll } = require('../src/pktline');
+    const body = Buffer.alloc(MAX_PAYLOAD * 2 + 17, 0xa5);
+    const packets = [];
+    const sink = new Writable({
+      highWaterMark: 1,
+      write(chunk, _encoding, callback) {
+        assert.ok(chunk.length <= MAX_PAYLOAD + 4);
+        packets.push(Buffer.from(chunk));
+        setImmediate(callback);
+      }
+    });
+    await writeContent(sink, body);
+    assert.ok(Buffer.concat(packets).equals(encodeContent(body)));
+    assert.strictEqual(sink.listenerCount('drain'), 0);
+    assert.strictEqual(sink.listenerCount('error'), 0);
+    const error = new Error('output transport failed');
+    const broken = new Writable({ write(_chunk, _encoding, callback) { setImmediate(() => callback(error)); } });
+    await assert.rejects(writeAll(broken, Buffer.from('test')), (err) => err === error);
+    const closing = new Writable({ write() { this.destroy(); } });
+    await assert.rejects(writeAll(closing, Buffer.from('test')), /output closed/);
+    ok('pkt-line output respects backpressure, bounds packets and rejects failures');
+  } catch (e) {
+    fail('pkt-line output respects backpressure, bounds packets and rejects failures', e);
+  }
+
+  try {
+    const { PktReader, encodeContent, encodeFlush, MAX_PAYLOAD } = require('../src/pktline');
+    const bytes = Buffer.alloc(MAX_PAYLOAD * 2 + 11);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = i % 256;
+    const wire = Buffer.concat([encodeContent(bytes), encodeFlush()]);
+    const stream = new Readable({ read() { } });
+    const reader = new PktReader(stream);
+    const result = reader.readBinaryUntilFlush();
+    // Yield between fragments so both pending header and payload reads resume.
+    const sizes = [1, 2, 1, 3, 8191, 7, 65519];
+    let pos = 0;
+    let part = 0;
+    while (pos < wire.length) {
+      const end = Math.min(wire.length, pos + sizes[part++ % sizes.length]);
+      stream.push(wire.subarray(pos, end));
+      pos = end;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    stream.push(null);
+    const decoded = await result;
+    assert.strictEqual(decoded.eof, false);
+    assert.ok(decoded.data.equals(bytes));
+    assert.strictEqual(await reader.readPacket(), null);
+    assert.strictEqual(reader.buffered, 0);
+    assert.deepStrictEqual(reader.chunks, []);
+    ok('pkt-line fragmented multi-packet binary input releases consumed chunks');
+  } catch (e) {
+    fail('pkt-line fragmented multi-packet binary input releases consumed chunks', e);
+  }
+
+  try {
+    const { PktReader, encodeContent, encodeFlush, MAX_PAYLOAD } = require('../src/pktline');
+    const bytes = Buffer.alloc(MAX_PAYLOAD * 16, 0x61);
+    const wire = Buffer.concat([encodeContent(bytes), encodeFlush()]);
+    let offset = 0;
+    const stream = new Readable({
+      highWaterMark: 16384,
+      read() {
+        if (offset === wire.length) { this.push(null); return; }
+        const end = Math.min(wire.length, offset + 16384);
+        this.push(wire.subarray(offset, end));
+        offset = end;
+      }
+    });
+    const reader = new PktReader(stream);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(stream.isPaused());
+    assert.ok(reader.buffered <= 4 * (MAX_PAYLOAD + 4) + 16384);
+    assert.ok(offset < wire.length, 'producer must stop while the consumer is idle');
+    const result = await reader.readBinaryUntilFlush();
+    assert.ok(result.data.equals(bytes));
+    assert.strictEqual(await reader.readPacket(), null);
+    assert.strictEqual(reader.buffered, 0);
+    ok('pkt-line input pauses idle consumers and resumes without losing bytes');
+  } catch (e) {
+    fail('pkt-line input pauses idle consumers and resumes without losing bytes', e);
+  }
+
+  try {
+    const { PktReader } = require('../src/pktline');
+    const stream = new Readable({ read() { } });
+    const reader = new PktReader(stream);
+    const first = reader.readPacket();
+    stream.push(Buffer.from('0008ab', 'ascii'));
+    await new Promise((resolve) => setImmediate(resolve));
+    const second = reader.readPacket();
+    stream.push(Buffer.from('cd0007xyz0000000100020004', 'ascii'));
+    stream.push(null);
+    assert.strictEqual((await first).data.toString(), 'abcd');
+    assert.strictEqual((await second).data.toString(), 'xyz');
+    assert.strictEqual((await reader.readPacket()).flush, true);
+    assert.strictEqual((await reader.readPacket()).special, '0001');
+    assert.strictEqual((await reader.readPacket()).special, '0002');
+    assert.strictEqual((await reader.readPacket()).data.length, 0);
+    assert.strictEqual(await reader.readPacket(), null);
+    ok('pkt-line overlapping reads preserve order and special packets');
+  } catch (e) {
+    fail('pkt-line overlapping reads preserve order and special packets', e);
+  }
+
+  try {
+    const { PktReader } = require('../src/pktline');
+    for (const [wire, error] of [
+      ['00', /truncated pkt-line header/],
+      ['0008ab', /truncated pkt-line payload/],
+      ['00zz', /invalid pkt-line length/],
+      ['ffff', /invalid pkt-line length/]
+    ]) {
+      const stream = new Readable({ read() { } });
+      const reader = new PktReader(stream);
+      const rejected = assert.rejects(reader.readPacket(), error);
+      stream.push(Buffer.from(wire, 'ascii'));
+      stream.push(null);
+      await rejected;
+    }
+    ok('pkt-line pending reads reject invalid and truncated input');
+  } catch (e) {
+    fail('pkt-line pending reads reject invalid and truncated input', e);
+  }
+
+  try {
     const { withLock } = require('../src/lock');
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-lk-'));
     const order = [];
@@ -744,7 +1260,7 @@ async function runAsync() {
       await withLock(dir, () => {
         const owner = fs.readFileSync(path.join(lockDirFor(dir), 'owner.json'), 'utf8');
         writeSourceOrCopy(dir, kn, {}, 'User/new.c');
-        assert.ok(fs.readFileSync(path.join(kn, 'User', 'new.c')).equals(encodeCp936(text)));
+        assert.ok(fs.readFileSync(path.join(kn, 'User', 'new.c')).equals(Buffer.from(text, 'utf8')));
         // A Git filter in another process must also finish while sync owns
         // the operation lock; same-process reentrancy alone cannot fix this.
         const filterJs = require.resolve('../src/filter_core');
@@ -758,8 +1274,8 @@ async function runAsync() {
         assert.strictEqual(fs.readFileSync(path.join(lockDirFor(dir), 'owner.json'), 'utf8'), owner);
       });
       const table = loadTable(dir);
-      assert.strictEqual(table['User/new.c'], 'Gbk');
-      assert.strictEqual(table['User/child.h'], 'Gbk');
+      assert.strictEqual(table['User/new.c'], 'Utf8');
+      assert.strictEqual(table['User/child.h'], 'Utf8');
       assert.strictEqual(fs.readFileSync(path.join(dir, 'User', 'new.c'), 'utf8'), text);
       assert.strictEqual(fs.existsSync(lockDirFor(dir)), false);
       assert.strictEqual(fs.existsSync(lockDirFor(dir, 'encoding-table')), false);
@@ -988,7 +1504,7 @@ test('library attributes cancel -text so autocrlf still applies', () => {
   assert.ok(body.indexOf('output.hex') < 0);
 });
 
-test('keil-native stores unmapped chinese as gbk and keeps worktree utf8', () => {
+test('keil-native preserves unmapped source encodings and worktree bytes', () => {
   const os = require('os');
   const fs = require('fs');
   const path = require('path');
@@ -1010,14 +1526,14 @@ test('keil-native stores unmapped chinese as gbk and keeps worktree utf8', () =>
   const neu = fs.readFileSync(path.join(kn, 'User', 'new.c'));
   const asGbk = fs.readFileSync(path.join(kn, 'User', 'gbk.c'));
   const kept = fs.readFileSync(path.join(kn, 'User', 'kept.c'));
-  assert.ok(neu.equals(gbk));
+  assert.ok(neu.equals(Buffer.from(text, 'utf8')));
   assert.strictEqual(fs.readFileSync(path.join(repo, 'User', 'new.c'), 'utf8'), text);
   assert.ok(asGbk.equals(gbk));
-  assert.strictEqual(fs.readFileSync(path.join(repo, 'User', 'gbk.c'), 'utf8'), text);
+  assert.ok(fs.readFileSync(path.join(repo, 'User', 'gbk.c')).equals(gbk));
   assert.strictEqual(detectKind(kept), 'Utf8');
   assert.strictEqual(kept.toString('utf8'), text);
   const table = loadTable(repo);
-  assert.strictEqual(table['User/new.c'], 'Gbk');
+  assert.strictEqual(table['User/new.c'], 'Utf8');
   assert.strictEqual(table['User/gbk.c'], 'Gbk');
 });
 
