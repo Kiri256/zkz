@@ -1044,6 +1044,9 @@ test('lib encoding flags gbk-to-utf8 and fffd, not ascii edits', () => {
   assert.strictEqual(ascii, null);
   const gbk2 = encodeCp936('// \u6ce8\u91ca\n');
   assert.strictEqual(judgeLibChange('Libraries/c.c', gbk, gbk2, true), null);
+  // Libraries bypass clean/smudge; valid non-CP936 bytes are not a warning.
+  const nonCp936 = Buffer.from('/* Cortex\u00ae-M */\n', 'utf8');
+  assert.strictEqual(judgeLibChange('Libraries/e.h', nonCp936, nonCp936, true), null);
   const broken = Buffer.concat([Buffer.from('int '), Buffer.from([0xEF, 0xBF, 0xBD])]);
   const fffd = judgeLibChange('Libraries/d.c', gbk, broken, true);
   assert.ok(fffd && fffd.reasons.indexOf('fffd') >= 0);

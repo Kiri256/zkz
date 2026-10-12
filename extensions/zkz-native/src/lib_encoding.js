@@ -5,7 +5,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { detectKind, decodeCp936, roundtripOk } = require('./encoding');
+const { detectKind } = require('./encoding');
 const { slashRel, isSourceExt, isLibRel, ensureZkz, formatLocalNow, atomicWriteJson, libEncodingWarnPath } = require('./paths');
 const { catFileBatchSync, gitConfigGet } = require('./git_exec');
 
@@ -29,13 +29,6 @@ function judgeLibChange(rel, oldBuf, newBuf, hasOld) {
     if (blobKind === 'Gbk' && (wtKind === 'Utf8' || wtKind === 'Utf8Bom')) reasons.push('drift');
   }
   if (fffd > 0) reasons.push('fffd');
-  if (wtKind === 'Gbk' && next.length) {
-    try {
-      if (!roundtripOk(decodeCp936(next))) reasons.push('roundtrip');
-    } catch (_) {
-      reasons.push('roundtrip');
-    }
-  }
   if (!reasons.length) return null;
   return {
     rel: slashRel(rel),
@@ -61,7 +54,14 @@ function readLibWarningFile(repoRoot) {
 function loadLibWarnings(repoRoot) {
   const raw = readLibWarningFile(repoRoot);
   if (!raw || !Array.isArray(raw.items)) return [];
-  return raw.items;
+  // `roundtrip` was emitted by an older library check that decoded raw
+  // library bytes as CP936 even though libraries bypass clean/smudge. Those
+  // records are stale after the check was narrowed to real drift/replacement
+  // bytes.
+  return raw.items.filter((item) => {
+    const reasons = Array.isArray(item && item.reasons) ? item.reasons : [];
+    return reasons.indexOf('roundtrip') < 0;
+  });
 }
 
 function libWarningsNotified(repoRoot) {
