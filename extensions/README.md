@@ -16,7 +16,7 @@
 
 工程根目录、Keil 布局、过滤器是否启用、设置读写都在 `extensions/shared/`，三个扩展直接 `require`，不再互相回退。打包时 `require('../../shared/<名>')` 改写成 `require('./shared/<名>')`，并把对应文件拷进 vsix。
 
-设置写在仓库 `.zkz/settings.json`（`native` / `keil` / `code`）。没有文件时按默认值补齐，已有的键不覆盖。空字符串按未设置处理，继续走环境变量。这份文件不进 git。
+设置写在仓库 `.zkz/settings.json`（`native` / `keil` / `code`）。默认值在 `extensions/shared/zkz_settings.js`。工作区没有设置文件时按这些默认值生成，已有的键不覆盖。空字符串按未设置处理。这份文件不进 git。
 
 - `zkz-keil` 编烧前：过滤器已启用则调用 `zkz-native.syncKeilTree`，命令不在就失败；未启用则编真源
 - `zkz-keil` 调试：按布局把 `output.axf` 拷到 `.zkz/output.axf`；gdb map 在过滤器启用时用 `substitute-path` 把编烧树指回真源

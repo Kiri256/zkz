@@ -25,25 +25,16 @@ function firstExisting(cands) {
 }
 
 function jlinkExeCandidates(root, flavor) {
-  if (String(flavor || '').toLowerCase() === 'h750') {
-    return [
-      cfg.get(root, 'h750.jlinkPath', ''),
-      process.env.ZKZ_JLINK_698,
-      'C:\\Program Files (x86)\\SEGGER\\JLink\\JLink.exe'
-    ];
-  }
+  const prefix = String(flavor || '').toLowerCase() === 'h750' ? 'h750' : 'f429';
   return [
-    cfg.get(root, 'f429.jlinkPath', ''),
-    process.env.ZKZ_JLINK_502,
-    'C:\\Program Files (x86)\\SEGGER\\JLink_V502c\\JLink.exe'
+    cfg.get(root, prefix + '.jlinkPath', ''),
+    cfg.get(root, prefix + '.jlinkGdbServerPath', '')
   ];
 }
 
 function jlinkMissingMessage(flavor) {
-  if (String(flavor || '').toLowerCase() === 'h750') {
-    return 'J-Link.exe not found. Set .zkz/settings.json keil.h750.jlinkPath or env ZKZ_JLINK_698.';
-  }
-  return 'J-Link.exe not found. Set .zkz/settings.json keil.f429.jlinkPath or env ZKZ_JLINK_502.';
+  const prefix = String(flavor || '').toLowerCase() === 'h750' ? 'h750' : 'f429';
+  return 'J-Link.exe not found. Set .zkz/settings.json keil.' + prefix + '.jlinkPath.';
 }
 
 function isGdbServerName(file) {
@@ -83,12 +74,8 @@ function getJLinkFlashTool(root, flavor) {
   const patchGlobal = cfg.get(root, 'patchGlobalJLinkDevices', true) !== false;
   if (kind === 'h750') {
     const exe = jlinkExe(root, 'h750');
-    const flm = firstExisting([
-      cfg.get(root, 'h750.flmPath', ''),
-      process.env.ZKZ_H750_FLM,
-      'D:\\ruanjian\\keil\\ARM\\Flash\\STM32H750_W25Q32.FLM'
-    ]);
-    if (!flm) throw new Error('H750 QSPI FLM not found. Set .zkz/settings.json keil.h750.flmPath or env ZKZ_H750_FLM.');
+    const flm = firstExisting([cfg.get(root, 'h750.flmPath', '')]);
+    if (!flm) throw new Error('H750 QSPI FLM not found. Set .zkz/settings.json keil.h750.flmPath.');
     return {
       flavor: 'h750',
       exe,
@@ -318,10 +305,7 @@ function flashFailed(code, text) {
 }
 
 async function pinResetAfterFlash(workDir, device, log, exe) {
-  const exe698 = exe || firstExisting([
-    process.env.ZKZ_JLINK_698,
-    'C:\\Program Files (x86)\\SEGGER\\JLink\\JLink.exe'
-  ]);
+  const exe698 = exe && existsFile(exe) ? path.resolve(exe) : '';
   if (!exe698) {
     if (log) log('Skip pin-reset: J-Link 6.98 JLink.exe not found');
     return;

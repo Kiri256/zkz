@@ -32,18 +32,9 @@ function decodeGbk(buf) {
 
 function getUv4Path(root) {
   const cfg = require('./keil_config');
-  const cands = [
-    cfg.get(root, 'uv4Path', ''),
-    process.env.ZKZ_KEIL_UV4,
-    'D:\\ruanjian\\keil\\UV4\\UV4.exe',
-    'C:\\Keil_v5\\UV4\\UV4.exe',
-    'C:\\Keil\\UV4\\UV4.exe'
-  ];
-  for (const c of cands) {
-    const p = String(c || '').trim().replace(/^["']|["']$/g, '');
-    if (p && fs.existsSync(p)) return path.resolve(p);
-  }
-  throw new Error('Keil UV4.exe not found. Set .zkz/settings.json keil.uv4Path or env ZKZ_KEIL_UV4.');
+  const p = String(cfg.get(root, 'uv4Path', '') || '').trim().replace(/^["']|["']$/g, '');
+  if (p && fs.existsSync(p)) return path.resolve(p);
+  throw new Error('Keil UV4.exe not found. Set .zkz/settings.json keil.uv4Path.');
 }
 
 function resolveTarget(layout) {
@@ -387,6 +378,23 @@ function currentJlinkGdbServerPath() {
   return jlinkGdbServerPath(root, resolveKeilLayout(root).flavor);
 }
 
+function currentGdbPath() {
+  return require('./keil_launch').findGdb(resolvePair().root);
+}
+
+function currentDebugConfigValue(kind) {
+  const root = resolvePair().root;
+  const flavor = resolveKeilLayout(root).flavor;
+  if (kind === 'device') {
+    const cfg = require('./keil_config');
+    return String(cfg.get(root, flavor === 'h750' ? 'h750.device' : 'f429.device', flavor === 'h750' ? 'STM32H750IB' : 'STM32F429BI'));
+  }
+  const launch = require('./keil_launch');
+  const value = launch.findSvd(root, flavor);
+  if (!value) throw new Error(flavor + ' SVD not found; set keil.' + flavor + '.svdFile or keil.packRoot');
+  return value;
+}
+
 function activate(context) {
   const wrap = (action, title) => async () => {
     output.show(true);
@@ -421,6 +429,9 @@ function activate(context) {
       }
     }),
     vscode.commands.registerCommand('zkz-keil.jlinkGdbServerPath', () => currentJlinkGdbServerPath()),
+    vscode.commands.registerCommand('zkz-keil.gdbPath', () => currentGdbPath()),
+    vscode.commands.registerCommand('zkz-keil.device', () => currentDebugConfigValue('device')),
+    vscode.commands.registerCommand('zkz-keil.svdFile', () => currentDebugConfigValue('svdFile')),
     vscode.debug.registerDebugConfigurationProvider('cortex-debug', {
       resolveDebugConfiguration(folder, config) {
         if (!config || config.type !== 'cortex-debug') return config || undefined;
