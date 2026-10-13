@@ -73,36 +73,34 @@ function verGreater(a, b) {
   return false;
 }
 
-function packRoots() {
-  const roots = [
-    process.env.ZKZ_KEIL_PACKS,
-    'D:\\ruanjian\\Keil\\Packs\\Keil',
-    'C:\\Keil_v5\\ARM\\Packs\\Keil',
-    'C:\\Keil\\ARM\\Packs\\Keil'
-  ];
-  if (process.env.LOCALAPPDATA) {
-    roots.push(path.join(process.env.LOCALAPPDATA, 'Arm', 'Packs', 'Keil'));
-  }
-  return roots;
+function packRoots(root) {
+  return [cfg.get(root, 'packRoot', '')];
 }
 
-function findPackedSvd(flavor) {
-  const h750 = flavor === 'h750';
-  const pack = h750 ? 'STM32H7xx_DFP' : 'STM32F4xx_DFP';
-  const file = h750 ? 'STM32H750x.svd' : 'STM32F429x.svd';
+function svdNames(flavor) {
+  if (flavor === 'h750') return ['STM32H750.svd', 'STM32H750x.svd'];
+  return ['STM32F429x.svd', 'STM32F429.svd'];
+}
+
+function findPackedSvd(root, flavor) {
+  const pack = flavor === 'h750' ? 'STM32H7xx_DFP' : 'STM32F4xx_DFP';
+  const names = svdNames(flavor);
   let best = '';
   let bestVer = '';
-  const roots = packRoots();
+  const roots = packRoots(root);
   for (let i = 0; i < roots.length; i++) {
     const dir = path.join(String(roots[i] || ''), pack);
     let vers = [];
     try { vers = fs.readdirSync(dir); } catch (_) { vers = []; }
     for (let j = 0; j < vers.length; j++) {
-      const svd = path.join(dir, vers[j], 'CMSIS', 'SVD', file);
-      if (!existsFile(svd)) continue;
-      if (!best || verGreater(vers[j], bestVer)) {
-        best = svd;
-        bestVer = vers[j];
+      for (let k = 0; k < names.length; k++) {
+        const svd = path.join(dir, vers[j], 'CMSIS', 'SVD', names[k]);
+        if (!existsFile(svd)) continue;
+        if (!best || verGreater(vers[j], bestVer)) {
+          best = svd;
+          bestVer = vers[j];
+        }
+        break;
       }
     }
   }
@@ -113,26 +111,14 @@ function findSvd(root, flavor) {
   const key = flavor === 'h750' ? 'h750.svdFile' : 'f429.svdFile';
   const set = firstExisting([cfg.get(root, key, '')]);
   if (set) return slash(set);
-  const packed = findPackedSvd(flavor);
+  const packed = findPackedSvd(root, flavor);
   return packed ? slash(packed) : '';
 }
 
 function findGdb(root) {
-  const direct = firstExisting([
-    cfg.get(root, 'gdbPath', ''),
-    process.env.ZKZ_ARM_GDB,
-    'D:\\ruanjian\\arm-gnu-toolchain-15.2.rel1-mingw-w64-i686-arm-none-eabi\\bin\\arm-none-eabi-gdb.exe'
-  ]);
+  const direct = firstExisting([cfg.get(root, 'gdbPath', '')]);
   if (direct) return slash(direct);
-  const parent = 'D:\\ruanjian';
-  let names = [];
-  try { names = fs.readdirSync(parent); } catch (_) { names = []; }
-  names = names.filter((n) => /^arm-gnu-toolchain/i.test(n)).sort();
-  for (let i = names.length - 1; i >= 0; i--) {
-    const p = path.join(parent, names[i], 'bin', 'arm-none-eabi-gdb.exe');
-    if (existsFile(p)) return slash(p);
-  }
-  throw new Error('arm-none-eabi-gdb.exe not found. Set .zkz/settings.json keil.gdbPath or env ZKZ_ARM_GDB.');
+  throw new Error('arm-none-eabi-gdb.exe not found. Set .zkz/settings.json keil.gdbPath.');
 }
 
 function baseConfig(root, flavor) {
@@ -150,10 +136,10 @@ function baseConfig(root, flavor) {
     cwd: '${workspaceFolder}',
     executable: '${workspaceFolder}/.zkz/output.axf',
     servertype: 'jlink',
-    device: device,
+    device: '${command:zkz-keil.device}',
     interface: 'swd',
     serverpath: '${command:zkz-keil.jlinkGdbServerPath}',
-    gdbPath: gdbPath,
+    gdbPath: '${command:zkz-keil.gdbPath}',
     debuggerArgs: ['-x', '${workspaceFolder}/.zkz/gdb_source_map.gdb'],
     postStartSessionCommands: ['source .zkz/gdb_source_map.gdb'],
     showDevDebugOutput: 'raw',
@@ -161,7 +147,7 @@ function baseConfig(root, flavor) {
     serverArgs: ['-speed', speed],
     overrideAttachCommands: ['monitor flash breakpoints = 1']
   };
-  if (svdFile) config.svdFile = svdFile;
+  config.svdFile = '${command:zkz-keil.svdFile}';
   return { device: device, gdbPath: gdbPath, svdFile: svdFile, config: config };
 }
 

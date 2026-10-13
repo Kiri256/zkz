@@ -156,9 +156,16 @@ test('settings.json keeps false and blank falls back', () => {
   try {
     const seeded = ensure(root);
     assert.strictEqual(seeded.keil.flavor, 'f429');
+    assert.strictEqual(seeded.keil.uv4Path, 'D:/ruanjian/keil/UV4/UV4.exe');
+    assert.strictEqual(seeded.keil.packRoot, 'D:/ruanjian/Keil/Packs/Keil');
+    const written = JSON.parse(fs.readFileSync(settingsFile(root), 'utf8'));
+    assert.strictEqual(written.keil.uv4Path, 'D:/ruanjian/keil/UV4/UV4.exe');
+    assert.strictEqual(written.keil.h750.svdFile, 'D:/ruanjian/Keil/Packs/Keil/STM32H7xx_DFP/3.1.0/CMSIS/SVD/STM32H750.svd');
+    assert.strictEqual(written.keil.h750.device, 'STM32H750IB');
     assert.strictEqual(seeded.native.glob, '*.c,*.h');
     assert.strictEqual(seeded.code.ifdefFold.minLines, 2);
     assert.ok(fs.existsSync(settingsFile(root)));
+    set(root, 'keil', 'uv4Path', '');
     assert.strictEqual(get(root, 'keil', 'uv4Path', 'from-env'), 'from-env');
     set(root, 'keil', 'h750.target', 'Custom');
     set(root, 'keil', 'speedKHz', 0);
@@ -191,6 +198,8 @@ test('jlink gdb server path follows flavor', () => {
     fs.writeFileSync(path.join(h750, 'JLinkGDBServerCL.exe'), '');
     set(root, 'keil', 'f429.jlinkPath', path.join(f429, 'JLink.exe'));
     set(root, 'keil', 'h750.jlinkPath', path.join(h750, 'JLink.exe'));
+    set(root, 'keil', 'f429.jlinkGdbServerPath', '');
+    set(root, 'keil', 'h750.jlinkGdbServerPath', '');
     assert.strictEqual(jlinkGdbServerPath(root, 'f429'), path.join(f429, 'JLinkGDBServerCL.exe'));
     assert.strictEqual(jlinkGdbServerPath(root, 'h750'), path.join(h750, 'JLinkGDBServerCL.exe'));
     set(root, 'keil', 'f429.jlinkPath', path.join(f429, 'JLinkGDBServerCL.exe'));
@@ -234,9 +243,10 @@ test('configureLaunch writes flavor device and keeps other configs', () => {
     const doc = JSON.parse(stripJsonComments(text));
     assert.strictEqual(doc.configurations.length, 3);
     assert.strictEqual(doc.configurations[0].name, '编译调试');
-    assert.strictEqual(doc.configurations[0].device, 'STM32F429BI');
-    assert.strictEqual(doc.configurations[0].svdFile, svdF.replace(/\\/g, '/'));
+    assert.strictEqual(doc.configurations[0].device, '${command:zkz-keil.device}');
+    assert.strictEqual(doc.configurations[0].svdFile, '${command:zkz-keil.svdFile}');
     assert.strictEqual(doc.configurations[0].serverpath, '${command:zkz-keil.jlinkGdbServerPath}');
+    assert.strictEqual(doc.configurations[0].gdbPath, '${command:zkz-keil.gdbPath}');
     assert.strictEqual(doc.configurations[0].preLaunchTask, 'zkz-keil: Build + Flash + Prepare Debug');
     assert.deepStrictEqual(doc.configurations[0].serverArgs, ['-speed', '4000']);
     assert.strictEqual(doc.configurations[1].name, '调试');
@@ -246,9 +256,9 @@ test('configureLaunch writes flavor device and keeps other configs', () => {
     set(root, 'keil', 'h750.device', 'STM32H750IB');
     const h750 = writeLaunchJson(root);
     const again = JSON.parse(stripJsonComments(fs.readFileSync(h750.file, 'utf8')));
-    assert.strictEqual(again.configurations[0].device, 'STM32H750IB');
-    assert.strictEqual(again.configurations[0].svdFile, svdH.replace(/\\/g, '/'));
-    assert.strictEqual(again.configurations[1].device, 'STM32H750IB');
+    assert.strictEqual(again.configurations[0].device, '${command:zkz-keil.device}');
+    assert.strictEqual(again.configurations[0].svdFile, '${command:zkz-keil.svdFile}');
+    assert.strictEqual(again.configurations[1].device, '${command:zkz-keil.device}');
     assert.strictEqual(again.configurations.length, 3);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

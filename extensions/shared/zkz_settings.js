@@ -8,32 +8,34 @@ const DEFAULTS = {
     enabled: true,
     glob: '*.c,*.h',
     paths: [
-      '.cursor/rules',
-      '.cursor/skills',
-      '.codex/skills',
-      '.vscode/settings.json'
+      ".cursor",
+      ".vscode",
+      "AGENTS.md"
     ]
   },
   keil: {
-    uv4Path: '',
-    gdbPath: '',
+    uv4Path: 'D:/ruanjian/keil/UV4/UV4.exe',
+    gdbPath: 'D:/ruanjian/arm-gnu-toolchain-15.2.rel1-mingw-w64-i686-arm-none-eabi/bin/arm-none-eabi-gdb.exe',
+    packRoot: 'D:/ruanjian/Keil/Packs/Keil',
     flavor: 'f429',
     speedKHz: 6000,
     debugSpeedKHz: 4000,
     patchGlobalJLinkDevices: true,
     h750: {
-      jlinkPath: '',
-      flmPath: '',
+      jlinkPath: 'C:/Program Files (x86)/SEGGER/JLink/JLink.exe',
+      jlinkGdbServerPath: 'C:/Program Files (x86)/SEGGER/JLink/JLinkGDBServerCL.exe',
+      flmPath: 'D:/ruanjian/keil/ARM/Flash/STM32H750_W25Q32.FLM',
       device: 'STM32H750IB',
-      svdFile: '',
+      svdFile: 'D:/ruanjian/Keil/Packs/Keil/STM32H7xx_DFP/3.1.0/CMSIS/SVD/STM32H750.svd',
       target: 'H750_N',
       qspiBase: '0x90000000',
       qspiSize: '0x00400000'
     },
     f429: {
-      jlinkPath: '',
+      jlinkPath: 'C:/Program Files (x86)/SEGGER/JLink_V502c/JLink.exe',
+      jlinkGdbServerPath: 'C:/Program Files (x86)/SEGGER/jLink_V502c/JLinkGDBServerCL.exe',
       device: 'STM32F429BI',
-      svdFile: '',
+      svdFile: 'D:/ruanjian/Keil/Packs/Keil/STM32F4xx_DFP/2.14.0/CMSIS/SVD/STM32F429x.svd',
       target: 'Flash'
     }
   },

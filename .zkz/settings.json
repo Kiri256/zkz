@@ -3,10 +3,9 @@
     "enabled": true,
     "glob": "*.c,*.h",
     "paths": [
-      ".cursor/rules",
-      ".cursor/skills",
-      ".codex/skills",
-      ".vscode/settings.json"
+      ".cursor",
+      ".vscode",
+      "AGENTS.md"
     ]
   },
   "keil": {
@@ -23,14 +22,17 @@
       "svdFile": "",
       "target": "H750_N",
       "qspiBase": "0x90000000",
-      "qspiSize": "0x00400000"
+      "qspiSize": "0x00400000",
+      "jlinkGdbServerPath": "C:/Program Files (x86)/SEGGER/JLink/JLinkGDBServerCL.exe"
     },
     "f429": {
       "jlinkPath": "",
       "device": "STM32F429BI",
       "svdFile": "",
-      "target": "Flash"
-    }
+      "target": "Flash",
+      "jlinkGdbServerPath": "C:/Program Files (x86)/SEGGER/jLink_V502c/JLinkGDBServerCL.exe"
+    },
+    "packRoot": "D:/ruanjian/Keil/Packs/Keil"
   },
   "code": {
     "ifdefFold": {

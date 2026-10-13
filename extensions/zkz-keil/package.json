@@ -2,7 +2,7 @@
   "name": "zkz-keil",
   "displayName": "zkz Keil",
   "description": "Keil UV4 build, J-Link flash, and Cortex-Debug prepare. True-source + zkz-native builds the keil-native tree.",
-  "version": "1.0.25",
+  "version": "1.0.29",
   "publisher": "zkz",
   "icon": "media/zkz-keil.png",
   "engines": {
@@ -51,12 +51,20 @@
       {
         "command": "zkz-keil.jlinkGdbServerPath",
         "title": "zkz: J-Link GDB Server Path"
+      },
+      {
+        "command": "zkz-keil.gdbPath",
+        "title": "zkz: GDB Path"
       }
     ],
     "menus": {
       "commandPalette": [
         {
           "command": "zkz-keil.jlinkGdbServerPath",
+          "when": "false"
+        },
+        {
+          "command": "zkz-keil.gdbPath",
           "when": "false"
         }
       ]
