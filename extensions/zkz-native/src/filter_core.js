@@ -3,7 +3,7 @@
 const { slashRel, isLibRel } = require('./paths');
 const { detectKind, applySmudge, applyClean, planNewFile, parseMapped } = require('./encoding');
 const { noteNewFile } = require('./enc_table');
-const { recordRoundtripFailure, clearRoundtripFailure } = require('./observe');
+const { recordRoundtripFailure, clearRoundtripFailure, recordCp936Drop, clearCp936Drop } = require('./observe');
 
 function lookupKind(table, pathname) {
   if (!table) return null;
@@ -26,13 +26,21 @@ function reconcileSmudgeKind(actual, hinted) {
   return hint || act;
 }
 
+function noteCp936Drop(repoRoot, pathname, info) {
+  if (!repoRoot || !info) return;
+  if (info.count) recordCp936Drop(repoRoot, pathname, info);
+  else clearCp936Drop(repoRoot, pathname, info.stage);
+}
+
 function smudge(pathname, blobBytes, table, repoRoot, isLibraryPath) {
   if (repoRoot && (isLibraryPath ? isLibraryPath(pathname) : isLibRel(repoRoot, pathname))) return Buffer.from(blobBytes || []);
   const mapped = lookupKind(table, pathname);
   const hinted = mapped ? parseMapped(mapped).kind : '';
   const actual = detectKind(blobBytes);
   const kind = reconcileSmudgeKind(actual, hinted);
-  return applySmudge(kind, blobBytes);
+  return applySmudge(kind, blobBytes, {
+    onDrop: (info) => noteCp936Drop(repoRoot, pathname, info)
+  });
 }
 
 function clean(pathname, wtBytes, table, repoRoot, isLibraryPath) {
@@ -53,7 +61,8 @@ function clean(pathname, wtBytes, table, repoRoot, isLibraryPath) {
     onSoftFail: (err) => {
       soft = true;
       if (repoRoot) recordRoundtripFailure(repoRoot, pathname, err);
-    }
+    },
+    onDrop: (info) => noteCp936Drop(repoRoot, pathname, info)
   });
   if (!soft && repoRoot && parsed.kind === 'Gbk') clearRoundtripFailure(repoRoot, pathname);
   return out;

@@ -43,7 +43,7 @@ git hook 只保留 `pre-commit` / `pre-push`（挡坏提交/推送）。过滤�
 
 过滤器异常时运行 **zkz-native.disable** 即可卸掉（只改 `.git/config` 与 attributes，不依赖 filter 进程）。
 
-往返失败会记入 `.zkz/run/roundtrip-failures.json` 并在状态栏标出。`pre-commit` / `pre-push` 会拦编码不对的 blob。握手被拒时写 `.zkz/run/handshake-reject.json`（含首包 hex）。
+历史 GBK 里解不出的字节，以及工作区里的 U+FFFD，进出时直接丢掉。删除记在 `.zkz/run/roundtrip-failures.json` 的 `drops` 里（文件、clean 或 smudge、个数和位置），不写入 `files`，不拦提交。同一方向下一次过滤不再删字符时清掉对应记录。状态栏标出仍存在的文件。表情等 cp936 没有的字符仍记入同一文件的 `files`，并在状态栏标出。`pre-commit` / `pre-push` 会拦编码不对的 blob。握手被拒时写 `.zkz/run/handshake-reject.json`（含首包 hex）。
 
 `ZKZ_NATIVE_LOG=1` 时写 `.zkz/run/zkz-native.log`。
 

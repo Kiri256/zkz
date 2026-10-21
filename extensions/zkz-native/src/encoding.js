@@ -42,9 +42,38 @@ function detectKind(buf) {
   return 'Gbk';
 }
 
-function decodeCp936(buf) {
+function normalizeCp936Text(text) {
+  return String(text).replace(/\uFFFD/g, '');
+}
+
+function decodeCp936Raw(buf) {
   if (!buf || !buf.length) return '';
   return requireIconv().decode(Buffer.from(buf), 'gbk');
+}
+
+function cp936DropInfo(text, stage) {
+  const t = String(text);
+  const positions = [];
+  for (let i = 0; i < t.length; i++) {
+    if (t.charCodeAt(i) === 0xFFFD) positions.push(i);
+  }
+  const shown = positions.slice(0, 8);
+  let message = '';
+  if (positions.length) {
+    message = stage + ' dropped ' + positions.length + ' U+FFFD at ' + shown.join(', ');
+    if (positions.length > shown.length) message += ', ...';
+  }
+  return { stage: stage, count: positions.length, positions: shown, message: message };
+}
+
+function reportCp936Drop(opts, info) {
+  if (opts && typeof opts.onDrop === 'function') {
+    try { opts.onDrop(info); } catch (_) { /* ignore */ }
+  }
+}
+
+function decodeCp936(buf) {
+  return normalizeCp936Text(decodeCp936Raw(buf));
 }
 
 function encodeCp936(text) {
@@ -52,7 +81,7 @@ function encodeCp936(text) {
 }
 
 function roundtripOk(text) {
-  const t = String(text);
+  const t = normalizeCp936Text(text);
   try {
     return decodeCp936(encodeCp936(t)) === t;
   } catch (_) {
@@ -66,12 +95,16 @@ function wtToText(buf) {
   return Buffer.from(buf).toString('utf8');
 }
 
-function applySmudge(kind, blobBytes) {
+function applySmudge(kind, blobBytes, opts) {
   const k = kind || 'Ascii';
   const buf = blobBytes ? Buffer.from(blobBytes) : Buffer.alloc(0);
   if (k === 'Ascii' || k === 'Utf8') return buf;
   if (k === 'Utf8Bom') return hasUtf8Bom(buf) ? buf.slice(3) : buf;
-  if (k === 'Gbk') return Buffer.from(decodeCp936(buf), 'utf8');
+  if (k === 'Gbk') {
+    const decoded = decodeCp936Raw(buf);
+    reportCp936Drop(opts, cp936DropInfo(decoded, 'smudge'));
+    return Buffer.from(normalizeCp936Text(decoded), 'utf8');
+  }
   throw new Error('unknown encoding kind: ' + k);
 }
 
@@ -134,23 +167,26 @@ function applyClean(kind, wtBytes, opts) {
     return Buffer.concat([UTF8_BOM, buf]);
   }
   if (k === 'Gbk') {
-    // 尚未 smudge 的�?�盘 GBK 原字节：git 不会�?动再�?�?
-    // 若仍�? UTF-8 解码会变�? U+FFFD，往返失败�?
+    // 磁盘上仍是 GBK 原字节时，不要按 UTF-8 再编一次。
+    // 历史文件里的 U+FFFD 直接丢掉，并由 onDrop 记下；不记往返失败。
     if (!isStrictUtf8(buf)) return buf;
-    const text = wtToText(buf);
+    const rawText = wtToText(buf);
+    const drop = cp936DropInfo(rawText, 'clean');
+    const text = normalizeCp936Text(rawText);
     const encoded = encodeCp936(text);
     if (decodeCp936(encoded) !== text) {
       const hint = firstUnencodable(text);
       const err = new Error('cp936 roundtrip failed' + (hint ? ' (' + hint + ')' : ''));
       err.code = 'ZKZ_ROUNDTRIP';
-      // git status 也会�? clean；required=true 时抛错会让整�? status 失败�?
-      // 往返失败时原样交回工作区字节，提交仍由 pre-commit 拦�?
+      // git status 也会�? clean；required=true 时抛错会让整�? status 失败�?
+      // 往返失败时原样交回工作区字节，提交仍由 pre-commit 拦�?
       if (process.env.ZKZ_NATIVE_STRICT === '1') throw err;
       if (opts && typeof opts.onSoftFail === 'function') {
         try { opts.onSoftFail(err); } catch (_) { /* ignore */ }
       }
       return buf;
     }
+    reportCp936Drop(opts, drop);
     return encoded;
   }
   throw new Error('unknown encoding kind: ' + k);

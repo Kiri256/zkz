@@ -6,7 +6,7 @@ const { buildTable, loadTable, loadMeta, countByKind, noteTableRef } = require('
 const { installGitConfig, uninstallGitConfig, isInstalled } = require('./git_config');
 const { installHooks, uninstallHooks } = require('./hooks');
 const { atomicWriteJson, nativeStatusPath, ensureZkz, formatLocalNow } = require('./paths');
-const { loadRoundtripFailures, loadFilterFail } = require('./observe');
+const { loadRoundtripFailures, loadCp936Drops, loadFilterFail } = require('./observe');
 const { loadLibWarnings, libWarningsNotified } = require('./lib_encoding');
 const {
   diskNeedsSmudge,
@@ -40,6 +40,7 @@ function statusSnapshot(repoRoot) {
     }
   } catch (_) { /* ignore */ }
   const roundtripFails = loadRoundtripFailures(repoRoot);
+  const cp936Drops = loadCp936Drops(repoRoot);
   const ff = loadFilterFail(repoRoot);
   return {
     installed: installed,
@@ -47,6 +48,7 @@ function statusSnapshot(repoRoot) {
     counts: countByKind(files),
     unstable: unstable,
     roundtripFails: roundtripFails.map((x) => x.rel),
+    cp936Drops: cp936Drops.map((x) => x.rel),
     tableDrift: tableDrift(repoRoot),
     filterFails: ff.count,
     filterFailLast: ff.last,

@@ -707,6 +707,36 @@ test('reconcileSmudgeKind utf family vs gbk', () => {
   assert.strictEqual(reconcileSmudgeKind('Utf8', 'Utf8Bom'), 'Utf8Bom');
 });
 
+test('undecodable gbk byte is dropped', () => {
+  let drop = null;
+  assert.strictEqual(decodeCp936(Buffer.from([0x81])), '');
+  const wt = applySmudge('Gbk', Buffer.from([0x81, 0x20, 0x41]), {
+    onDrop: (info) => { drop = info; }
+  });
+  assert.strictEqual(wt.toString('utf8'), ' A');
+  assert.ok(wt.toString('utf8').indexOf('\uFFFD') < 0);
+  assert.strictEqual(drop.stage, 'smudge');
+  assert.strictEqual(drop.count, 1);
+  assert.deepStrictEqual(drop.positions, [0]);
+});
+
+test('clean drops U+FFFD without soft fail', () => {
+  let hit = 0;
+  let drop = null;
+  const wt = Buffer.from('     \uFFFD SB54, SB55 OFF\n', 'utf8');
+  const out = applyClean('Gbk', wt, {
+    onSoftFail: () => { hit += 1; },
+    onDrop: (info) => { drop = info; }
+  });
+  assert.strictEqual(hit, 0);
+  assert.ok(out.equals(encodeCp936('      SB54, SB55 OFF\n')));
+  assert.ok(roundtripOk('\uFFFD SB54'));
+  assert.strictEqual(drop.stage, 'clean');
+  assert.strictEqual(drop.count, 1);
+  assert.deepStrictEqual(drop.positions, [5]);
+  assert.ok(drop.message.indexOf('U+FFFD at 5') >= 0);
+});
+
 test('clean Gbk unencodable calls onSoftFail', () => {
   let hit = 0;
   const wt = Buffer.from('emoji \u{1F600}', 'utf8');
@@ -750,6 +780,49 @@ test('clean Gbk unencodable records sidecar', () => {
   assert.strictEqual(list[0].rel, 'User/a.c');
   clearRoundtripFailure(dir, 'User/a.c');
   assert.strictEqual(loadRoundtripFailures(dir).length, 0);
+});
+
+test('cp936 drop is recorded and cleared when that stage no longer drops', () => {
+  const os = require('os');
+  const path = require('path');
+  const fs = require('fs');
+  const { loadCp936Drops, loadRoundtripFailures } = require('../src/observe');
+  const { roundtripFailPath } = require('../src/paths');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-drop-'));
+  try {
+    const rel = 'User/bsp/system_stm32f4xx.c';
+    const file = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const broken = Buffer.from('     \uFFFD SB54\n', 'utf8');
+    fs.writeFileSync(file, broken);
+    const table = {};
+    table[rel] = 'Gbk';
+    clean(rel, broken, table, dir);
+    const listed = loadCp936Drops(dir);
+    assert.strictEqual(listed.length, 1);
+    assert.strictEqual(loadRoundtripFailures(dir).length, 0);
+    assert.strictEqual(listed[0].rel, rel);
+    assert.strictEqual(listed[0].count, 1);
+    assert.deepStrictEqual(listed[0].stages, ['clean']);
+    assert.ok(listed[0].message.indexOf('clean dropped 1 U+FFFD at 5') >= 0);
+    const saved = JSON.parse(fs.readFileSync(roundtripFailPath(dir), 'utf8'));
+    assert.ok(saved.drops[rel].clean);
+    assert.strictEqual(fs.existsSync(path.join(dir, '.zkz', 'run', 'cp936-drops.json')), false);
+    const blob = Buffer.from([0x81, 0x20, 0x41]);
+    smudge(rel, blob, table, dir);
+    const both = loadCp936Drops(dir);
+    assert.strictEqual(both.length, 1);
+    assert.deepStrictEqual(both[0].stages, ['clean', 'smudge']);
+    const plain = Buffer.from('      SB54\n', 'utf8');
+    fs.writeFileSync(file, plain);
+    clean(rel, plain, table, dir);
+    const afterClean = loadCp936Drops(dir);
+    assert.strictEqual(afterClean.length, 1);
+    assert.deepStrictEqual(afterClean[0].stages, ['smudge']);
+    smudge(rel, Buffer.from([0xB0, 0xA1]), table, dir);
+    assert.strictEqual(loadCp936Drops(dir).length, 0);
+    assert.ok(fs.existsSync(roundtripFailPath(dir)));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('roundtrip status ignores removed paths without deleting historical records', () => {

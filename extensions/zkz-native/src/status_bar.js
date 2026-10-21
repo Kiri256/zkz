@@ -52,6 +52,9 @@ function create(context, opts) {
       if (st.roundtripFails && st.roundtripFails.length) {
         tips.push('往返失败: ' + st.roundtripFails.slice(0, 8).join(', '));
       }
+      if (st.cp936Drops && st.cp936Drops.length) {
+        tips.push('丢掉替换字符: ' + st.cp936Drops.slice(0, 8).join(', ') + '。见 .zkz/run/roundtrip-failures.json');
+      }
       if (st.tableDrift) tips.push('编码表对应的分支已变，将自动刷新或请执行 refreshTable');
       const libItems = st.libWarnings || [];
       if (libItems.length) {
@@ -66,7 +69,7 @@ function create(context, opts) {
             'zkz-native filter 连续失败 ' + st.filterFails + ' 次，git 可能不可用。可执行 zkz-native.disable'
           );
         }
-      } else if ((st.roundtripFails && st.roundtripFails.length) || st.tableDrift || libItems.length) {
+      } else if ((st.roundtripFails && st.roundtripFails.length) || (st.cp936Drops && st.cp936Drops.length) || st.tableDrift || libItems.length) {
         item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
         if (libItems.length && !st.libWarningsNotified) {
           markLibWarningsNotified(repo);

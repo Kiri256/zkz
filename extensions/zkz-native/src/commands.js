@@ -37,10 +37,11 @@ function formatStatus(st) {
   const on = st.installed ? 'on' : 'off';
   const pending = (st.unstable && st.unstable.length) ? (' / ' + st.unstable.length + ' 待处理') : '';
   const rt = (st.roundtripFails && st.roundtripFails.length) ? (' / ' + st.roundtripFails.length + ' 往返失败') : '';
+  const dropped = (st.cp936Drops && st.cp936Drops.length) ? (' / 丢掉 ' + st.cp936Drops.length) : '';
   const drift = st.tableDrift ? ' / 表过期' : '';
   const ff = (st.filterFails >= FILTER_FAIL_LIMIT) ? (' / filter 失败×' + st.filterFails) : '';
   const libN = (st.libWarnings && st.libWarnings.length) ? (' / 库编码 ' + st.libWarnings.length) : '';
-  return 'zkz-native: ' + on + ' / 表 ' + st.tableCount + ' 项' + pending + rt + drift + ff + libN;
+  return 'zkz-native: ' + on + ' / 表 ' + st.tableCount + ' 项' + pending + rt + dropped + drift + ff + libN;
 }
 
 async function cmdEnable(extensionRoot, onStatus) {

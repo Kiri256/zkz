@@ -52,6 +52,71 @@ function recordRoundtripFailure(repoRoot, pathname, err) {
   } catch (_) { /* ignore */ }
 }
 
+function loadCp936Drops(repoRoot) {
+  const obj = readJson(roundtripFailPath(repoRoot), { files: {} });
+  const files = (obj && obj.drops && typeof obj.drops === 'object') ? obj.drops : {};
+  return Object.keys(files).filter((rel) => {
+    try { return fs.statSync(path.join(repoRoot, rel)).isFile(); } catch (err) {
+      return err.code !== 'ENOENT' && err.code !== 'ENOTDIR';
+    }
+  }).sort().map((rel) => {
+    const rec = files[rel] || {};
+    const stages = [];
+    let count = 0;
+    let at = '';
+    const messages = [];
+    ['clean', 'smudge'].forEach((stage) => {
+      const item = rec[stage];
+      if (!item || !item.count) return;
+      stages.push(stage);
+      count += item.count;
+      if (item.message) messages.push(String(item.message));
+      if (item.at && String(item.at) > at) at = String(item.at);
+    });
+    return { rel: rel, count: count, stages: stages, message: messages.join('; '), at: at };
+  }).filter((item) => item.count > 0);
+}
+
+function recordCp936Drop(repoRoot, pathname, info) {
+  if (!repoRoot || !info || !info.count) return;
+  try {
+    ensureZkz(repoRoot);
+    const p = roundtripFailPath(repoRoot);
+    const obj = readJson(p, { files: {} });
+    if (!obj.drops || typeof obj.drops !== 'object') obj.drops = {};
+    const rel = slashRel(pathname);
+    const stage = info.stage === 'smudge' ? 'smudge' : 'clean';
+    const at = formatLocalNow();
+    if (!obj.drops[rel] || typeof obj.drops[rel] !== 'object') obj.drops[rel] = {};
+    obj.at = at;
+    obj.drops[rel][stage] = {
+      count: info.count,
+      positions: Array.isArray(info.positions) ? info.positions.slice(0, 8) : [],
+      message: String(info.message || ''),
+      at: at
+    };
+    atomicWriteJson(p, obj);
+    appendLog(repoRoot, 'cp936 drop ' + rel + ' ' + (info.message || ''));
+  } catch (_) { /* ignore */ }
+}
+
+function clearCp936Drop(repoRoot, pathname, stage) {
+  if (!repoRoot) return;
+  try {
+    const p = roundtripFailPath(repoRoot);
+    const obj = readJson(p, null);
+    if (!obj || !obj.drops) return;
+    const rel = slashRel(pathname);
+    const rec = obj.drops[rel];
+    if (!rec || typeof rec !== 'object') return;
+    if (stage === 'smudge' || stage === 'clean') delete rec[stage];
+    else delete obj.drops[rel];
+    if (obj.drops[rel] && !obj.drops[rel].clean && !obj.drops[rel].smudge) delete obj.drops[rel];
+    obj.at = formatLocalNow();
+    atomicWriteJson(p, obj);
+  } catch (_) { /* ignore */ }
+}
+
 function clearRoundtripFailure(repoRoot, pathname) {
   if (!repoRoot) return;
   try {
@@ -166,6 +231,9 @@ module.exports = {
   loadRoundtripFailures,
   recordRoundtripFailure,
   clearRoundtripFailure,
+  loadCp936Drops,
+  recordCp936Drop,
+  clearCp936Drop,
   loadFilterFail,
   recordFilterFail,
   resetFilterFail,
