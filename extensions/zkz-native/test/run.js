@@ -1537,6 +1537,38 @@ async function runAsync() {
     fail('enable smudges worktree to UTF-8 and status stays clean', e);
   }
 
+  try {
+    const { spawnSync } = require('child_process');
+    const { warmFile } = require('../src/textconv_cache');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-warm-repo-'));
+    const git = (args, input) => {
+      const r = spawnSync('git', args, { cwd: dir, windowsHide: true, input: input, encoding: 'utf8' });
+      assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+    };
+    try {
+      git(['init', '-q']);
+      git(['config', 'user.email', 't@example.com']);
+      git(['config', 'user.name', 't']);
+      git(['config', 'diff.zkznative.textconv', 'textconv-test']);
+      fs.writeFileSync(path.join(dir, 'a.c'), 'int a;\n');
+      git(['add', 'a.c']);
+      git(['commit', '-q', '-m', 'a']);
+      fs.writeFileSync(path.join(dir, 'a.c'), 'int b;\n');
+      git(['add', 'a.c']);
+      git(['commit', '-q', '-m', 'b']);
+      const first = await warmFile(dir, 'a.c');
+      assert.strictEqual(first.added, 2);
+      const second = await warmFile(dir, 'a.c');
+      assert.strictEqual(second.blobs, 2);
+      assert.strictEqual(second.added, 0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    ok('warmFile streams history and a second pass adds nothing');
+  } catch (e) {
+    fail('warmFile streams history and a second pass adds nothing', e);
+  }
+
   finish(extra);
 }
 
@@ -1783,6 +1815,37 @@ test('runtime files move from .zkz into .zkz/run', () => {
   assert.strictEqual(fs.existsSync(path.join(zkz, 'locks')), false);
   assert.strictEqual(fs.readFileSync(path.join(zkz, 'run', 'locks', 'x.lock'), 'utf8'), '1');
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('textconv notes keep the validity message and both fanout entries', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const { spawnSync } = require('child_process');
+  const { insertNotes, commitMessage, TEXTCONV_NOTES } = require('../src/textconv_cache');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-notes-'));
+  const git = (args, input) => {
+    const r = spawnSync('git', args, { cwd: dir, windowsHide: true, input: input, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+    return String(r.stdout || '').trim();
+  };
+  try {
+    git(['init', '-q']);
+    const a = git(['hash-object', '-w', '--stdin'], 'alpha');
+    const b = git(['hash-object', '-w', '--stdin'], 'beta');
+    const na = git(['hash-object', '-w', '--stdin'], 'ALPHA');
+    const nb = git(['hash-object', '-w', '--stdin'], 'BETA');
+    const validity = Buffer.from('"node" "textconv.js"', 'utf8');
+    insertNotes(dir, [{ objectSha: a, noteSha: na }], validity);
+    assert.ok(commitMessage(dir, TEXTCONV_NOTES).equals(validity));
+    insertNotes(dir, [{ objectSha: b, noteSha: nb }], validity);
+    assert.ok(commitMessage(dir, TEXTCONV_NOTES).equals(validity));
+    const read = (sha) => git(['cat-file', '-p', TEXTCONV_NOTES + ':' + sha.slice(0, 2) + '/' + sha.slice(2)]);
+    assert.strictEqual(read(a), 'ALPHA');
+    assert.strictEqual(read(b), 'BETA');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 runAsync();

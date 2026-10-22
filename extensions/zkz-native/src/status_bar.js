@@ -16,7 +16,8 @@ const NATIVE_MENU = [
   { label: '同步编烧树', command: 'zkz-native.syncKeilTree' },
   { label: '拷贝调试 axf', command: 'zkz-native.copyDebugAxf' },
   { label: '保存本地配置', command: 'zkz-native.saveConfigOverlay' },
-  { label: '还原本地配置', command: 'zkz-native.restoreConfigOverlay' }
+  { label: '还原本地配置', command: 'zkz-native.restoreConfigOverlay' },
+  { label: '预热追溯缓存', command: 'zkz-native.warmTextconv' }
 ];
 
 // 左侧状态栏，数字越大越靠左：code 10、clangd 9、native 8、keil 7。

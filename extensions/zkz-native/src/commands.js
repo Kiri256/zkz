@@ -12,6 +12,7 @@ const { syncKeilTree, copyDebugAxf } = require('./keil_tree');
 const { seedOverlay, restoreOverlay } = require('./overlay');
 const { withLock } = require('./lock');
 const { FILTER_FAIL_LIMIT } = require('./observe');
+const { warmFile } = require('./textconv_cache');
 
 function output() {
   if (!output._ch) output._ch = vscode.window.createOutputChannel('zkz Native');
@@ -173,6 +174,24 @@ function cmdRestoreConfigOverlay() {
   return r;
 }
 
+async function cmdWarmTextconv() {
+  const repo = requireInstalled();
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.uri.scheme !== 'file') throw new Error('请先打开一个 .c/.h 文件');
+  const rel = slashRel(path.relative(repo, editor.document.uri.fsPath));
+  if (!/\.(c|h)$/i.test(rel)) throw new Error('只预热 .c/.h 的追溯缓存');
+  const r = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: '预热追溯缓存 ' + rel, cancellable: false },
+    () => withLock(repo, () => warmFile(repo, rel))
+  );
+  const msg = r.added
+    ? '已预热 ' + rel + '：历史 ' + r.blobs + ' 个版本，新写入 ' + r.added + ' 个。请先等正在跑的 git blame 结束，再打开这个文件。'
+    : rel + ' 的追溯缓存已经是热的（' + r.blobs + ' 个版本）。';
+  emit(msg);
+  void vscode.window.showInformationMessage(msg);
+  return r;
+}
+
 function register(context, extensionRoot, hooks) {
   const onStatus = typeof hooks === 'function' ? hooks : (hooks && hooks.onStatus);
   const onActive = hooks && hooks.onActive;
@@ -205,7 +224,8 @@ function register(context, extensionRoot, hooks) {
     vscode.commands.registerCommand('zkz-native.syncKeilTree', wrap(cmdSyncKeilTree)),
     vscode.commands.registerCommand('zkz-native.copyDebugAxf', wrap(cmdCopyDebugAxf)),
     vscode.commands.registerCommand('zkz-native.saveConfigOverlay', wrap(cmdSaveConfigOverlay)),
-    vscode.commands.registerCommand('zkz-native.restoreConfigOverlay', wrap(cmdRestoreConfigOverlay))
+    vscode.commands.registerCommand('zkz-native.restoreConfigOverlay', wrap(cmdRestoreConfigOverlay)),
+    vscode.commands.registerCommand('zkz-native.warmTextconv', wrap(cmdWarmTextconv))
   );
 }
 

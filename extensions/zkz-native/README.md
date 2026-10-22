@@ -32,6 +32,7 @@
 | `zkz-native.copyDebugAxf` | 把调试 axf 拷到 `.zkz/output.axf` |
 | `zkz-native.saveConfigOverlay` | 把 `.zkz/settings.json` 里 `native.paths` 列出的本机配置存成权威副本（切分支后提示是否还原） |
 | `zkz-native.restoreConfigOverlay` | 立刻从权威副本还原上述全部路径；目录保留，只删其中除 `.gitkeep` / `gitkeep` 以外的文件 |
+| `zkz-native.warmTextconv` | 用一次进程把当前 `.c/.h` 的全部历史版本写入 `refs/notes/textconv/zkznative`。冷缓存时整文件 blame 会为每个历史 blob 另起 node；预热后不再这样做。不要删除这份缓存 |
 
 `.zkz/settings.json` 的 `native.paths` 只给手动的 overlay 保存/还原用。旧的 `.zkz/config_paths.json` 会在读取时并进这份名单后删除；其中的 `skipWorktree` / `overlay` / `forbidStage` 也会合并进来。这些文件按普通 Git 路径显示在更改里，不再 skip-worktree，也不禁止暂存。`.zkz/` 内部文件不进 overlay。
 

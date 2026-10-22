@@ -9,6 +9,7 @@ if __name__ == "__main__":
         "filter_core.js",
         "filter_process.js",
         "textconv.js",
+        "textconv_cache.js",
         "enc_table.js",
         "git_exec.js",
         "git_status.js",
