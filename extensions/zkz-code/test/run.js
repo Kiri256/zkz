@@ -408,18 +408,47 @@ test('findProjectRoot walks up to Project or git', () => {
   const os = require('os');
   const path = require('path');
   const fs = require('fs');
-  const { findProjectRoot } = require('../../shared/project_root');
+  const { findProjectRoot, folderForRoot } = require('../../shared/project_root');
   const { isNativeInstalled } = require('../../shared/native_installed');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-root-'));
   const nested = path.join(root, 'a', 'b');
+  const ext = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-ext-'));
+  const fw = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-fw-'));
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-fw2-'));
   try {
     fs.mkdirSync(path.join(root, '.git'), { recursive: true });
     fs.mkdirSync(nested, { recursive: true });
     assert.strictEqual(findProjectRoot([nested]), root);
     assert.strictEqual(findProjectRoot([]), '');
     assert.strictEqual(isNativeInstalled(root), false);
+
+    fs.mkdirSync(path.join(ext, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(fw, 'Project'), { recursive: true });
+    fs.mkdirSync(path.join(fw, 'User'), { recursive: true });
+    fs.mkdirSync(path.join(fw, '.git'), { recursive: true });
+    assert.strictEqual(findProjectRoot([ext, fw]), fw);
+    assert.strictEqual(findProjectRoot([fw, ext]), fw);
+    fs.writeFileSync(path.join(ext, 'readme.md'), 'x\n');
+    assert.strictEqual(findProjectRoot([ext, fw], path.join(ext, 'readme.md')), fw);
+
+    const nativeTree = path.join(fw, '.zkz', 'keil-native');
+    fs.mkdirSync(path.join(nativeTree, 'Project'), { recursive: true });
+    fs.mkdirSync(path.join(nativeTree, 'User'), { recursive: true });
+    fs.mkdirSync(path.join(nativeTree, 'core'), { recursive: true });
+    assert.strictEqual(findProjectRoot([nativeTree, ext]), fw);
+
+    fs.mkdirSync(path.join(other, 'User'), { recursive: true });
+    fs.mkdirSync(path.join(other, 'core'), { recursive: true });
+    const inOther = path.join(other, 'User', 'a.c');
+    fs.writeFileSync(inOther, 'int x;\n');
+    assert.strictEqual(findProjectRoot([fw, other]), fw);
+    assert.strictEqual(findProjectRoot([fw, other], inOther), other);
+    assert.strictEqual(folderForRoot([ext, fw], fw), fw);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(ext, { recursive: true, force: true });
+    fs.rmSync(fw, { recursive: true, force: true });
+    fs.rmSync(other, { recursive: true, force: true });
   }
 });
 

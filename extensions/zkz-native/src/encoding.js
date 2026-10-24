@@ -46,9 +46,43 @@ function normalizeCp936Text(text) {
   return String(text).replace(/\uFFFD/g, '');
 }
 
+function sentinelChar(byte) {
+  return String.fromCharCode(0xE000 + byte);
+}
+
+function decodeCp936Bytes(buf) {
+  const src = Buffer.from(buf);
+  const iconv = requireIconv();
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const b0 = src[i];
+    if (b0 >= 0x81 && b0 <= 0xFE && i + 1 < src.length) {
+      const pair = iconv.decode(src.slice(i, i + 2), 'gbk');
+      if (pair.indexOf('\uFFFD') < 0) {
+        out += pair;
+        i += 2;
+        continue;
+      }
+    }
+    const one = iconv.decode(src.slice(i, i + 1), 'gbk');
+    if (one.indexOf('\uFFFD') < 0) {
+      out += one;
+      i += 1;
+      continue;
+    }
+    out += sentinelChar(b0);
+    i += 1;
+  }
+  return out;
+}
+
 function decodeCp936Raw(buf) {
   if (!buf || !buf.length) return '';
-  return requireIconv().decode(Buffer.from(buf), 'gbk');
+  const src = Buffer.from(buf);
+  const text = requireIconv().decode(src, 'gbk');
+  if (text.indexOf('\uFFFD') < 0) return text;
+  return decodeCp936Bytes(src);
 }
 
 function cp936DropInfo(text, stage) {
@@ -77,7 +111,26 @@ function decodeCp936(buf) {
 }
 
 function encodeCp936(text) {
-  return Buffer.from(requireIconv().encode(String(text), 'gbk'));
+  const iconv = requireIconv();
+  const s = String(text);
+  const chunks = [];
+  let plain = '';
+  const flush = () => {
+    if (!plain) return;
+    chunks.push(Buffer.from(iconv.encode(plain, 'gbk')));
+    plain = '';
+  };
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xE000 && c <= 0xE0FF) {
+      flush();
+      chunks.push(Buffer.from([c - 0xE000]));
+    } else {
+      plain += s.charAt(i);
+    }
+  }
+  flush();
+  return chunks.length ? Buffer.concat(chunks) : Buffer.alloc(0);
 }
 
 function roundtripOk(text) {
@@ -168,7 +221,7 @@ function applyClean(kind, wtBytes, opts) {
   }
   if (k === 'Gbk') {
     // 磁盘上仍是 GBK 原字节时，不要按 UTF-8 再编一次。
-    // 历史文件里的 U+FFFD 直接丢掉，并由 onDrop 记下；不记往返失败。
+    // 工作区里已有的 U+FFFD 丢掉并记下。解不开的原字节用私用区字符原样带回，避免状态消不掉。
     if (!isStrictUtf8(buf)) return buf;
     const rawText = wtToText(buf);
     const drop = cp936DropInfo(rawText, 'clean');
