@@ -336,9 +336,12 @@ async function runFlash(pair, token, emit) {
 async function runPrepare(pair, emit) {
   const layout = resolveKeilLayout(pair.root);
   emit('Prepare Cortex Debug');
-  emit('  Opened:  ' + ((vscode.workspace.workspaceFolders || [])[0]
-    ? vscode.workspace.workspaceFolders[0].uri.fsPath
-    : ''));
+  const { folderForRoot } = require('../../shared/project_root');
+  const opened = folderForRoot(
+    (vscode.workspace.workspaceFolders || []).map(function (f) { return f.uri.fsPath; }),
+    pair.root
+  );
+  emit('  Opened:  ' + opened);
   emit('  Keil/true source: ' + pair.root);
   await publishDebugArtifacts(pair.root, layout, emit);
   emit('Done.');

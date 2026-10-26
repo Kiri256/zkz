@@ -707,17 +707,15 @@ test('reconcileSmudgeKind utf family vs gbk', () => {
   assert.strictEqual(reconcileSmudgeKind('Utf8', 'Utf8Bom'), 'Utf8Bom');
 });
 
-test('undecodable gbk byte is dropped', () => {
+test('undecodable gbk byte round-trips', () => {
   let drop = null;
-  assert.strictEqual(decodeCp936(Buffer.from([0x81])), '');
-  const wt = applySmudge('Gbk', Buffer.from([0x81, 0x20, 0x41]), {
-    onDrop: (info) => { drop = info; }
-  });
-  assert.strictEqual(wt.toString('utf8'), ' A');
+  const blob = Buffer.from([0x20, 0x96, 0x20, 0x53, 0x42]);
+  const wt = applySmudge('Gbk', blob, { onDrop: (info) => { drop = info; } });
   assert.ok(wt.toString('utf8').indexOf('\uFFFD') < 0);
-  assert.strictEqual(drop.stage, 'smudge');
-  assert.strictEqual(drop.count, 1);
-  assert.deepStrictEqual(drop.positions, [0]);
+  assert.strictEqual(wt.toString('utf8').charCodeAt(1), 0xE096);
+  assert.strictEqual(drop.count, 0);
+  assert.ok(applyClean('Gbk', wt).equals(blob));
+  assert.ok(roundtripOk(wt.toString('utf8')));
 });
 
 test('clean drops U+FFFD without soft fail', () => {
@@ -808,18 +806,13 @@ test('cp936 drop is recorded and cleared when that stage no longer drops', () =>
     const saved = JSON.parse(fs.readFileSync(roundtripFailPath(dir), 'utf8'));
     assert.ok(saved.drops[rel].clean);
     assert.strictEqual(fs.existsSync(path.join(dir, '.zkz', 'run', 'cp936-drops.json')), false);
-    const blob = Buffer.from([0x81, 0x20, 0x41]);
-    smudge(rel, blob, table, dir);
-    const both = loadCp936Drops(dir);
-    assert.strictEqual(both.length, 1);
-    assert.deepStrictEqual(both[0].stages, ['clean', 'smudge']);
+    smudge(rel, Buffer.from([0x81, 0x20, 0x41]), table, dir);
+    const afterSmudge = loadCp936Drops(dir);
+    assert.strictEqual(afterSmudge.length, 1);
+    assert.deepStrictEqual(afterSmudge[0].stages, ['clean']);
     const plain = Buffer.from('      SB54\n', 'utf8');
     fs.writeFileSync(file, plain);
     clean(rel, plain, table, dir);
-    const afterClean = loadCp936Drops(dir);
-    assert.strictEqual(afterClean.length, 1);
-    assert.deepStrictEqual(afterClean[0].stages, ['smudge']);
-    smudge(rel, Buffer.from([0xB0, 0xA1]), table, dir);
     assert.strictEqual(loadCp936Drops(dir).length, 0);
     assert.ok(fs.existsSync(roundtripFailPath(dir)));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }

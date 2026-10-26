@@ -1,6 +1,8 @@
 'use strict';
 
+const path = require('path');
 const vscode = require('vscode');
+const { folderForRoot } = require('../../shared/project_root');
 
 const ACTIONS = [
   { action: 'build', name: 'Keil Build', group: 'build' },
@@ -56,10 +58,24 @@ function makeTask(folder, spec) {
   return task;
 }
 
+function taskFolder() {
+  const folders = vscode.workspace.workspaceFolders || [];
+  if (!folders.length) return undefined;
+  let root = '';
+  try { root = require('./pair').resolvePair().root; } catch (_) { return undefined; }
+  const chosen = folderForRoot(folders.map(function (f) { return f.uri.fsPath; }), root);
+  const want = path.resolve(chosen).toLowerCase();
+  for (let i = 0; i < folders.length; i++) {
+    if (path.resolve(folders[i].uri.fsPath).toLowerCase() === want) return folders[i];
+  }
+  return undefined;
+}
+
 function activate(context) {
   const provider = {
     provideTasks() {
-      const folder = (vscode.workspace.workspaceFolders || [])[0];
+      const folder = taskFolder();
+      if (!folder) return [];
       return ACTIONS.map((spec) => makeTask(folder, spec));
     },
     resolveTask(task) {
@@ -67,7 +83,8 @@ function activate(context) {
       if (!action) return undefined;
       const spec = ACTIONS.filter((a) => a.action === action)[0]
         || { action: action, name: task.name || action, group: '' };
-      const folder = (vscode.workspace.workspaceFolders || [])[0];
+      const folder = taskFolder();
+      if (!folder) return undefined;
       return makeTask(folder, spec);
     }
   };

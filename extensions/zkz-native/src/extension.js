@@ -11,8 +11,8 @@ const { withLock } = require('./lock');
 const { startHeadWatch } = require('./head_watch');
 const { currentBranch } = require('./git_exec');
 
-function tryRepo() {
-  try { return commands.resolveRepo(); } catch (_) { return ''; }
+function tryRepo(filePath) {
+  try { return commands.resolveRepo(filePath); } catch (_) { return ''; }
 }
 
 function headLabel(repo, to) {
@@ -34,12 +34,9 @@ function warnActivate(step, e) {
 
 function activate(context) {
   const extensionRoot = context.extensionPath;
-  const repo = tryRepo();
-  if (repo) {
-    try { require('../../shared/zkz_settings').ensure(repo); } catch (_) { /* ignore */ }
-  }
-  const bar = statusBar.create(context, { defer: !!repo });
+  const bar = statusBar.create(context, { defer: !!tryRepo() });
   let headSub = null;
+  let watchedRepo = '';
 
   const stopHeadWatch = () => {
     if (!headSub) return;
@@ -47,9 +44,12 @@ function activate(context) {
     headSub = null;
   };
 
-  const startWatch = () => {
-    if (!repo || headSub) return;
-    headSub = startHeadWatch(context, repo, async ({ from, to }) => {
+  const startWatch = (repo) => {
+    if (!repo || !isInstalled(repo)) return;
+    if (headSub && watchedRepo === repo) return;
+    stopHeadWatch();
+    watchedRepo = repo;
+    headSub = startHeadWatch(null, repo, async ({ from, to }) => {
       if (!isInstalled(repo)) return;
       const where = headLabel(repo, to);
       try {
@@ -82,38 +82,56 @@ function activate(context) {
     });
   };
 
-  commands.register(context, extensionRoot, {
-    onStatus: () => bar.refresh(),
-    onActive: (on) => {
-      if (on) startWatch();
-      else stopHeadWatch();
-      try { bar.refresh(); } catch (_) { /* ignore */ }
+  const syncWatch = (verify, filePath) => {
+    const repo = tryRepo(filePath);
+    if (repo) {
+      try { require('../../shared/zkz_settings').ensure(repo); } catch (_) { /* ignore */ }
     }
-  });
-
-  setImmediate(() => {
-    let installed = false;
-    try {
-      installed = !!(repo && isInstalled(repo));
-      if (installed) {
-        startWatch();
+    const installed = !!(repo && isInstalled(repo));
+    if (installed) {
+      startWatch(repo);
+      if (verify) {
         try { verifyGitConfig(repo, extensionRoot); } catch (e) { warnActivate('verifyGitConfig', e); }
         try { verifyHooks(repo, extensionRoot); } catch (e) { warnActivate('verifyHooks', e); }
         if (tableDrift(repo)) {
           void withLock(repo, () => refresh(repo, extensionRoot))
             .then(() => bar.refresh())
             .catch((e) => warnActivate('refreshTable', e));
-        } else {
-          bar.refresh();
         }
-      } else {
-        try { bar.refresh(); } catch (_) { /* ignore */ }
       }
-    } catch (e) {
+    } else {
+      stopHeadWatch();
+      watchedRepo = '';
+    }
+    try { bar.refresh(); } catch (_) { /* ignore */ }
+    void vscode.commands.executeCommand('setContext', 'zkzNative.enabled', installed);
+  };
+
+  commands.register(context, extensionRoot, {
+    onStatus: () => bar.refresh(),
+    onActive: (on) => {
+      if (on) startWatch(tryRepo());
+      else stopHeadWatch();
+      try { bar.refresh(); } catch (_) { /* ignore */ }
+    }
+  });
+
+  context.subscriptions.push(
+    { dispose: stopHeadWatch },
+    vscode.workspace.onDidChangeWorkspaceFolders(() => syncWatch(true)),
+    vscode.window.onDidChangeActiveTextEditor((ed) => {
+      const uri = ed && ed.document && ed.document.uri;
+      if (!uri || uri.scheme !== 'file') return;
+      if (tryRepo(uri.fsPath) === watchedRepo) return;
+      syncWatch(true, uri.fsPath);
+    })
+  );
+
+  setImmediate(() => {
+    try { syncWatch(true); } catch (e) {
       warnActivate('init', e);
       try { bar.refresh(); } catch (_) { /* ignore */ }
     }
-    void vscode.commands.executeCommand('setContext', 'zkzNative.enabled', installed);
   });
 }
 

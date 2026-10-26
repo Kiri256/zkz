@@ -90,7 +90,7 @@ function endYtMacroCheckoutGuard() {
 }
 
 function workspaceRoot() {
-  return (vscode.workspace.workspaceFolders || [])[0]?.uri.fsPath || '';
+  try { return resolvePair().root; } catch (_) { return ''; }
 }
 
 function sourceRoot() {
@@ -564,8 +564,39 @@ function activate(context) {
   };
   const clangdWatcher = vscode.workspace.createFileSystemWatcher('**/.clangd');
 
+  let headSub = null;
+  let headRepo = '';
+  const stopHead = () => {
+    if (!headSub) return;
+    try { headSub.dispose(); } catch (_) { /* ignore */ }
+    headSub = null;
+  };
+  const bindHead = (filePath) => {
+    let next = '';
+    try { next = resolvePair(filePath || '').root; } catch (_) { next = clangdRoot() || sourceRoot(); }
+    if (next === headRepo && headSub) return;
+    stopHead();
+    headRepo = next || '';
+    if (!headRepo) return;
+    const head = readHeadOid(headRepo) || gitHead(headRepo);
+    if (head && isCompileCommandsStale(headRepo, head)) void autoRefreshCc(headRepo, head);
+    headSub = startHeadWatch(null, headRepo, (payload) => onHeadChanged(payload));
+  };
+
   context.subscriptions.push(
-    vscode.workspace.onDidChangeWorkspaceFolders(() => refreshStatus()),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      bindHead();
+      refreshStatus();
+    }),
+    vscode.window.onDidChangeActiveTextEditor((ed) => {
+      const uri = ed && ed.document && ed.document.uri;
+      if (!uri || uri.scheme !== 'file') return;
+      let next = '';
+      try { next = resolvePair(uri.fsPath).root; } catch (_) { next = clangdRoot() || sourceRoot(); }
+      if (next === headRepo) return;
+      bindHead(uri.fsPath);
+      refreshStatus();
+    }),
     vscode.workspace.onDidSaveTextDocument((doc) => {
       const fp = (doc && doc.uri && doc.uri.fsPath) || '';
       if (/(^|[\\/])\.clangd$/i.test(fp)) {
@@ -588,6 +619,7 @@ function activate(context) {
         if (gRefreshTimer) clearTimeout(gRefreshTimer);
         if (gMacroBaselineFreezeTimer) clearTimeout(gMacroBaselineFreezeTimer);
         gMacroBaselineFrozen = false;
+        stopHead();
         if (bar) bar.dispose();
         bar = null;
       }
@@ -596,12 +628,7 @@ function activate(context) {
 
   refreshStatus();
   refreshCcBadge();
-  const headRoot = clangdRoot() || sourceRoot();
-  if (headRoot) {
-    const head = readHeadOid(headRoot) || gitHead(headRoot);
-    if (head && isCompileCommandsStale(headRoot, head)) void autoRefreshCc(headRoot, head);
-    startHeadWatch(context, headRoot, (payload) => onHeadChanged(payload));
-  }
+  bindHead();
 }
 
 function deactivate() {

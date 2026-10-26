@@ -286,45 +286,25 @@ function getYtVersionText(filePath) {
 }
 
 function inferWorkspaceRoot(filePath) {
+  const { findProjectRoot } = require('../../shared/project_root');
   try {
     const vscode = vscodeApi();
     const folders = (vscode && vscode.workspace && vscode.workspace.workspaceFolders) || [];
-    if (filePath) {
-      const want = path.resolve(filePath);
-      const wantLow = want.toLowerCase();
-      for (const f of folders) {
-        const root = path.resolve(f.uri.fsPath);
-        const prefix = root.toLowerCase() + path.sep;
-        if (wantLow.startsWith(prefix) || wantLow === root.toLowerCase()) return root;
-      }
+    if (folders.length) {
+      const found = findProjectRoot(folders.map(function (f) { return f.uri.fsPath; }), filePath || '');
+      if (found) return found;
     }
-    if (folders.length) return folders[0].uri.fsPath;
   } catch (_) { /* ignore */ }
   if (!filePath) return '';
-  let dir = path.dirname(filePath);
-  for (let i = 0; i < 5; i++) {
-    if (findClangdConfig(dir) || findYtVersion(dir)) return dir;
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return path.dirname(filePath);
+  return findProjectRoot([filePath], filePath);
 }
 
 /**
- * 宏表唯一 root：工作区文件夹优先，其次工程根，再按文件向上找。
- * 徽章、菜单、同步、折叠都走这里，避免单槽缓存在两个 root 之间失效。
+ * 宏表唯一 root：与 native、keil 同一套认根。单槽缓存只在换根时换表。
  */
 function resolveMacroRoot(filePath) {
   try {
-    const vscode = vscodeApi();
-    const folders = (vscode && vscode.workspace && vscode.workspace.workspaceFolders) || [];
-    if (folders.length && folders[0] && folders[0].uri && folders[0].uri.fsPath) {
-      return folders[0].uri.fsPath;
-    }
-  } catch (_) { /* ignore */ }
-  try {
-    const pair = require('./pair').resolvePair();
+    const pair = require('./pair').resolvePair(filePath || '');
     if (pair && pair.root) return pair.root;
   } catch (_) { /* 未打开工作区时再按文件向上找 */ }
   return inferWorkspaceRoot(filePath || '');

@@ -23,11 +23,22 @@ function emit(msg) {
   output().appendLine(String(msg == null ? '' : msg));
 }
 
-function resolveRepo() {
+function activeEditorPath() {
+  try {
+    const ed = vscode.window.activeTextEditor;
+    const uri = ed && ed.document && ed.document.uri;
+    if (uri && uri.scheme === 'file') return uri.fsPath;
+  } catch (_) { /* ignore */ }
+  return '';
+}
+
+function resolveRepo(filePath) {
   const folders = vscode.workspace.workspaceFolders || [];
   if (!folders.length) throw new Error('未打开工作区');
-  const found = findProjectRoot(folders.map(function (f) { return f.uri.fsPath; }));
-  return found || folders[0].uri.fsPath;
+  const hint = filePath || activeEditorPath();
+  const found = findProjectRoot(folders.map(function (f) { return f.uri.fsPath; }), hint);
+  if (!found) throw new Error('无法解析工程根目录');
+  return found;
 }
 
 function cmdResolveRoot() {

@@ -14,11 +14,14 @@ function setPaired() {
   return ok;
 }
 
+function ensureSettings() {
+  try { require('../../shared/zkz_settings').ensure(resolvePair().root); } catch (_) { /* unpaired */ }
+}
+
 function activate(context) {
   statusBar.create(context, setPaired);
-  try {
-    require('../../shared/zkz_settings').ensure(resolvePair().root);
-  } catch (_) { /* unpaired */ }
+  ensureSettings();
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(ensureSettings));
   require('./keil').activate(context);
   require('./keil_tasks').activate(context);
 }

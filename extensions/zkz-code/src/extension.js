@@ -22,10 +22,11 @@ function activate(context) {
       throw e;
     }
   }));
-  try {
-    const pair = require('./pair').resolvePair();
-    require('../../shared/zkz_settings').ensure(pair.root);
-  } catch (_) { /* unpaired */ }
+  const ensureSettings = () => {
+    try { require('../../shared/zkz_settings').ensure(resolvePair().root); } catch (_) { /* unpaired */ }
+  };
+  ensureSettings();
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(ensureSettings));
   ifdefFold.activate(context, { commandPrefix: 'zkz-code' });
   void vscode.commands.executeCommand('setContext', 'zkzCode.enabled', true);
 }
