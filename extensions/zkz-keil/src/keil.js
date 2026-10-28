@@ -7,19 +7,14 @@ const { spawn } = require('child_process');
 const { resolvePair } = require('./pair');
 const { resolveKeilLayout } = require('./keil_layout');
 const { isNativeInstalled } = require('../../shared/native_installed');
-const { getJLinkFlashTool, jlinkGdbServerPath, stopJLinkGdbServer, invokeJLinkHexFlash } = require('./keil_flash');
+const { getJLinkFlashTool, jlinkGdbServerPath, invokeJLinkHexFlash } = require('./keil_flash');
 
-const output = vscode.window.createOutputChannel('zkz Keil');
 let iconv = null;
 try { iconv = require('iconv-lite'); } catch (_) { iconv = null; }
 
 function normalizeEmitText(msg) {
   const s = String(msg == null ? '' : msg);
   return s.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-}
-
-function outLog(msg) {
-  output.appendLine(normalizeEmitText(msg));
 }
 
 function decodeGbk(buf) {
@@ -34,7 +29,7 @@ function getUv4Path(root) {
   const cfg = require('./keil_config');
   const p = String(cfg.get(root, 'uv4Path', '') || '').trim().replace(/^["']|["']$/g, '');
   if (p && fs.existsSync(p)) return path.resolve(p);
-  throw new Error('Keil UV4.exe not found. Set .zkz/settings.json keil.uv4Path.');
+  throw new Error('找不到 Keil UV4.exe，请在 .zkz/settings.json 设置 keil.uv4Path。');
 }
 
 function resolveTarget(layout) {
@@ -76,6 +71,43 @@ function absLogText(text, projectDir) {
 
 function throwIfCancelled(token) {
   if (token && token.isCancellationRequested) throw new Error('\u5df2\u53d6\u6d88');
+}
+
+function quietCancel() {
+  const err = new Error('\u5df2\u53d6\u6d88');
+  err.zkzQuiet = true;
+  throw err;
+}
+
+function report(progress, message) {
+  if (progress && typeof progress.report === 'function') progress.report({ message: message });
+}
+
+/** 「编译调试」不确认机型。调试会话还在时问是否断开。扩展宿主线程调用。 */
+async function confirmDebugDisconnect() {
+  if (!vscode.debug.activeDebugSession) return;
+  const pick = await vscode.window.showWarningMessage(
+    '烧录会断开当前调试，继续？',
+    { modal: true },
+    '继续烧录'
+  );
+  if (pick !== '继续烧录') quietCancel();
+}
+
+/** 把 GBK 缓冲切成完整字节和末尾半个汉字。编译日志分段解码时调用。扩展宿主线程调用。 */
+function takeCompleteGbk(buf) {
+  const data = Buffer.isBuffer(buf) ? buf : Buffer.from(buf || []);
+  let i = 0;
+  while (i < data.length) {
+    const b = data[i];
+    if (b >= 0x81 && b <= 0xFE) {
+      if (i + 1 >= data.length) return { done: data.slice(0, i), rest: data.slice(i) };
+      i += 2;
+    } else {
+      i += 1;
+    }
+  }
+  return { done: data, rest: Buffer.alloc(0) };
 }
 
 async function prepareBuildTree(pair, emit) {
@@ -123,42 +155,60 @@ function spawnUv4(keilExe, args, logFile, projectDir, token, emit) {
     const child = spawn(keilExe, args, { windowsHide: true });
     let pos = 0;
     let stopped = false;
-    const readTail = () => {
+    let cancelled = false;
+    let pending = Buffer.alloc(0);
+    const readTail = (final) => {
       try {
         const st = fs.statSync(logFile);
-        if (st.size <= pos) return;
-        const fd = fs.openSync(logFile, 'r');
-        const buf = Buffer.alloc(st.size - pos);
-        fs.readSync(fd, buf, 0, buf.length, pos);
-        fs.closeSync(fd);
-        pos = st.size;
-        const chunk = absLogText(decodeGbk(buf), projectDir);
+        let buf = Buffer.alloc(0);
+        if (st.size > pos) {
+          const fd = fs.openSync(logFile, 'r');
+          buf = Buffer.alloc(st.size - pos);
+          fs.readSync(fd, buf, 0, buf.length, pos);
+          fs.closeSync(fd);
+          pos = st.size;
+        } else if (!final || !pending.length) return;
+        const merged = pending.length ? Buffer.concat([pending, buf]) : buf;
+        const split = final ? { done: merged, rest: Buffer.alloc(0) } : takeCompleteGbk(merged);
+        pending = split.rest;
+        if (!split.done.length) return;
+        const chunk = absLogText(decodeGbk(split.done), projectDir);
         if (chunk) emit(normalizeEmitText(chunk).replace(/\n$/, ''));
       } catch (_) { /* log still locked by UV4 */ }
     };
-    const timer = setInterval(readTail, 500);
+    const timer = setInterval(() => readTail(false), 500);
     const cancel = () => {
       if (stopped) return;
+      cancelled = true;
       try { child.kill(); } catch (_) { /* ignore */ }
     };
     if (token) {
-      if (token.isCancellationRequested) { cancel(); }
+      if (token.isCancellationRequested) cancel();
       else token.onCancellationRequested(cancel);
     }
-    child.on('error', (e) => {
+    const settle = (fn) => {
+      if (stopped) return;
       stopped = true;
       clearInterval(timer);
-      reject(e);
+      fn();
+    };
+    child.on('error', (e) => {
+      settle(() => reject(e));
     });
     child.on('close', (code) => {
-      stopped = true;
-      clearInterval(timer);
-      readTail();
-      resolve(code == null ? 1 : code);
+      settle(() => {
+        readTail(true);
+        if (cancelled || (token && token.isCancellationRequested)) {
+          reject(new Error('\u5df2\u53d6\u6d88'));
+          return;
+        }
+        resolve(code == null ? 1 : code);
+      });
     });
   });
 }
 
+/** 按 UV4 退出码给出编译成败，末尾原样再列报错和警告，便于从终端跳到源文件。扩展宿主线程调用。 */
 function summarizeBuild(logFile, projectDir, keilCode, emit) {
   let hasErrors = false;
   let hasWarnings = false;
@@ -177,28 +227,22 @@ function summarizeBuild(logFile, projectDir, keilCode, emit) {
       }
     }
   }
-  if (hasErrors || hasWarnings) {
-    emit('---------- Build Summary ----------');
-    if (hasErrors) {
-      emit(' Errors:');
-      errorLines.forEach((l) => emit('  [ERR] ' + l));
-    }
-    if (hasWarnings) {
-      emit(' Warnings:');
-      warningLines.forEach((l) => emit('  [WARN] ' + l));
-    }
-    emit('-----------------------------------');
+  if (errorLines.length || warningLines.length) {
+    emit('---------- 编译摘要 ----------');
+    errorLines.forEach((l) => emit(l));
+    warningLines.forEach((l) => emit(l));
+    emit('------------------------------');
   }
   let exitCode = 0;
   if (keilCode === 2 || keilCode === 3) exitCode = 1;
   else if ((keilCode == null || keilCode > 3) && hasErrors) exitCode = 1;
-  if (keilCode === 0) emit(' BUILD SUCCESS (0 warnings)');
-  else if (keilCode === 1) emit(' BUILD SUCCESS (with warnings)');
-  else if (keilCode === 2) emit(' BUILD FAILED (errors)');
-  else if (keilCode === 3) emit(' BUILD FAILED (fatal errors)');
-  else if (hasErrors) emit(' BUILD FAILED (errors in log)');
-  else if (hasWarnings) emit(' BUILD SUCCESS (with warnings)');
-  else emit(' BUILD ended with code ' + keilCode);
+  if (keilCode === 0) emit(' 编译成功（无警告）');
+  else if (keilCode === 1) emit(' 编译成功（有警告）');
+  else if (keilCode === 2) emit(' 编译失败（有错误）');
+  else if (keilCode === 3) emit(' 编译失败（致命错误）');
+  else if (hasErrors) emit(' 编译失败（日志里有错误）');
+  else if (hasWarnings) emit(' 编译成功（有警告）');
+  else emit(' 编译结束，退出码 ' + keilCode);
   return exitCode;
 }
 
@@ -207,9 +251,9 @@ function writeText(file, text) {
   fs.writeFileSync(file, text, 'utf8');
 }
 
-function writeGdbMapFiles(root, layout, mapText) {
+/** 把源路径映射写到仓库 .zkz/gdb_source_map.gdb。扩展宿主线程调用。 */
+function writeGdbMapFiles(root, mapText) {
   writeText(path.join(root, '.zkz', 'gdb_source_map.gdb'), mapText);
-  writeText(path.join(root, layout.relMap), mapText);
 }
 
 function copyDebugAxfLocal(root, emit) {
@@ -226,11 +270,11 @@ function copyDebugAxfLocal(root, emit) {
   return true;
 }
 
-async function publishDebugArtifacts(root, layout, emit) {
+async function publishDebugArtifacts(root, emit) {
   const copied = copyDebugAxfLocal(root, emit);
   if (!copied) {
     const stub = '# zkz-keil: gdb map skipped (no output.axf)\n';
-    writeGdbMapFiles(root, layout, stub);
+    writeGdbMapFiles(root, stub);
     emit('  gdb map skipped; debug continues without substitute-path');
     return;
   }
@@ -255,22 +299,19 @@ async function publishDebugArtifacts(root, layout, emit) {
     'directory "' + rootFwd + '/core"',
     ''
   ].join('\n');
-  writeGdbMapFiles(root, layout, mapText);
+  writeGdbMapFiles(root, mapText);
   if (nativeOn) emit('  gdb map keil-native -> true source');
   else emit('  gdb map true source only (native filter off)');
 }
 
-async function resolveWorkspace() {
-  return resolvePair();
-}
-
-async function runBuild(pair, mode, token, emit) {
+async function runBuild(pair, mode, token, emit, progress) {
   throwIfCancelled(token);
+  report(progress, mode === 'rebuild' ? '重新编译' : '编译中');
   const prep = await prepareBuildTree(pair, emit);
   throwIfCancelled(token);
   const layout = resolveBuildLayout(pair.root, !!(prep && prep.native));
   if (!fs.existsSync(layout.projectFile)) {
-    throw new Error('Keil project not found: ' + layout.projectFile);
+    throw new Error('找不到 Keil 工程：' + layout.projectFile);
   }
   const keilExe = getUv4Path(pair.root);
   const target = resolveTarget(layout);
@@ -280,100 +321,93 @@ async function runBuild(pair, mode, token, emit) {
   if (target) args.push('-t', target);
   args.push('-j0', '-o', logFile);
   emit('============================================');
-  emit(' Keil ' + mode.toUpperCase() + (target ? ('  Target: ' + target) : '  (Keil active Target)'));
-  emit(' Workspace: ' + pair.root);
-  if (prep && prep.native) emit(' Keil tree: ' + layout.buildRoot);
+  emit(' ' + (mode === 'rebuild' ? '重新编译' : '编译') + (target ? ('  目标: ' + target) : '  （Keil 当前目标）'));
+  emit(' 工程: ' + pair.root);
+  if (prep && prep.native) emit(' 编烧树: ' + layout.buildRoot);
   emit(' UV4: ' + keilExe);
   emit('============================================');
   emit('');
   const keilCode = await spawnUv4(keilExe, args, logFile, layout.projectDir, token, emit);
-  if (prep && prep.native) copyBuildArtifacts(pair.root, layout, emit);
   emit('');
   emit('============================================');
   const exitCode = summarizeBuild(logFile, layout.projectDir, keilCode, emit);
-  emit(' Build finished at: ' + new Date().toISOString().replace('T', ' ').slice(0, 19));
+  if (!exitCode && prep && prep.native) copyBuildArtifacts(pair.root, layout, emit);
+  emit(' 编译结束: ' + new Date().toISOString().replace('T', ' ').slice(0, 19));
   return exitCode;
 }
 
-async function runFlash(pair, token, emit) {
+/** 用 J-Link 烧录当前 hex。状态栏烧录直接开始；编译调试在会话还在时问是否断开。扩展宿主线程调用。 */
+async function performFlash(pair, token, emit, progress, confirmDebug) {
   throwIfCancelled(token);
+  if (confirmDebug) await confirmDebugDisconnect();
+  report(progress, '烧录中');
   const layout = resolveKeilLayout(pair.root);
   const hexPath = path.join(pair.root, layout.relHex);
-  if (!fs.existsSync(hexPath)) throw new Error('HEX not found, build first: ' + hexPath);
+  if (!fs.existsSync(hexPath)) throw new Error('还没有 hex，请先编译：' + hexPath);
   const tool = getJLinkFlashTool(pair.root, layout.flavor);
-  await stopJLinkGdbServer(emit);
-  const logFile = path.join(layout.projectDir, 'flash_output.txt');
+  const logFile = path.join(pair.root, '.zkz', 'jlink_flash', 'flash_output.txt');
   emit('============================================');
-  emit(' J-Link Flash  Flavor: ' + layout.flavor);
-  emit(' Workspace: ' + pair.root);
+  emit(' 烧录  机型: ' + layout.flavor);
+  emit(' 工程: ' + pair.root);
   emit(' HEX: ' + hexPath);
   if (layout.flavor === 'f429') {
-    emit(' App @ 0x0800C000  (do NOT chip-erase; boot is 0x08000000-0x0800BFFF)');
+    emit(' 应用在 0x0800C000，不会整片擦除；boot 为 0x08000000-0x0800BFFF');
   }
   if (layout.flavor === 'h750') {
-    emit(' App @ 0x90000000 QSPI W25Q32  (same as Keil JL2CM3; no erase; boot stays 0x08000000)');
+    emit(' 应用在 0x90000000 QSPI W25Q32，不擦除；boot 仍在 0x08000000');
   }
   emit('============================================');
   emit('');
   const result = await invokeJLinkHexFlash({
     tool,
     hexPath,
-    workDir: layout.projectDir,
+    root: pair.root,
     logFile,
     log: emit,
-    token
+    token,
+    progress
   });
   emit('');
   emit('============================================');
   if (!result.failed) {
-    emit(' FLASH SUCCESS');
+    emit(' 烧录成功');
     return 0;
   }
-  emit(' FLASH FAILED (exit code: ' + result.exitCode + ')');
+  emit(' 烧录失败（退出码 ' + result.exitCode + '）');
   return 1;
 }
 
 async function runPrepare(pair, emit) {
-  const layout = resolveKeilLayout(pair.root);
-  emit('Prepare Cortex Debug');
+  emit('准备调试');
   const { folderForRoot } = require('../../shared/project_root');
   const opened = folderForRoot(
     (vscode.workspace.workspaceFolders || []).map(function (f) { return f.uri.fsPath; }),
     pair.root
   );
-  emit('  Opened:  ' + opened);
-  emit('  Keil/true source: ' + pair.root);
-  await publishDebugArtifacts(pair.root, layout, emit);
-  emit('Done.');
+  emit('  已打开: ' + opened);
+  emit('  真源: ' + pair.root);
+  await publishDebugArtifacts(pair.root, emit);
+  emit('完成');
   return 0;
 }
 
 async function runKeilAction(action, opts) {
-  const emit = opts && opts.log ? opts.log : outLog;
+  const emit = opts && opts.log ? opts.log : function () { };
   const token = opts && opts.token;
-  const pair = await resolveWorkspace();
-  if (action === 'build') return runBuild(pair, 'build', token, emit);
-  if (action === 'rebuild') return runBuild(pair, 'rebuild', token, emit);
-  if (action === 'flash') return runFlash(pair, token, emit);
+  const progress = opts && opts.progress;
+  const pair = resolvePair();
+  if (action === 'build') return runBuild(pair, 'build', token, emit, progress);
+  if (action === 'rebuild') return runBuild(pair, 'rebuild', token, emit, progress);
+  if (action === 'flash') return performFlash(pair, token, emit, progress, false);
   if (action === 'prepare') return runPrepare(pair, emit);
-  if (action === 'buildFlash') {
-    const b = await runBuild(pair, 'build', token, emit);
-    if (b) return b;
-    return runFlash(pair, token, emit);
-  }
   if (action === 'buildFlashPrepare') {
-    const b = await runBuild(pair, 'build', token, emit);
+    const b = await runBuild(pair, 'build', token, emit, progress);
     if (b) return b;
-    const f = await runFlash(pair, token, emit);
+    const f = await performFlash(pair, token, emit, progress, true);
     if (f) return f;
     return runPrepare(pair, emit);
   }
-  if (action === 'flashPrepare') {
-    const f = await runFlash(pair, token, emit);
-    if (f) return f;
-    return runPrepare(pair, emit);
-  }
-  throw new Error('unknown keil action: ' + action);
+  throw new Error('未知的 Keil 动作：' + action);
 }
 
 function currentJlinkGdbServerPath() {
@@ -394,29 +428,29 @@ function currentDebugConfigValue(kind) {
   }
   const launch = require('./keil_launch');
   const value = launch.findSvd(root, flavor);
-  if (!value) throw new Error(flavor + ' SVD not found; set keil.' + flavor + '.svdFile or keil.packRoot');
+  if (!value) throw new Error('找不到 ' + flavor + ' 的 SVD，请设置 keil.' + flavor + '.svdFile 或 keil.packRoot');
   return value;
 }
 
+function currentDebugSpeed() {
+  const root = resolvePair().root;
+  return String(require('./keil_config').getNumber(root, 'debugSpeedKHz', 4000));
+}
+
 function activate(context) {
-  const wrap = (action, title) => async () => {
-    output.show(true);
-    const code = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: title, cancellable: true },
-      (_p, token) => runKeilAction(action, { log: outLog, token })
-    );
-    if (code) throw new Error(title + ' failed');
-  };
+  const tasks = () => require('./keil_tasks');
   const safe = (fn) => async () => {
     try { await fn(); }
-    catch (e) { vscode.window.showErrorMessage(String(e && e.message ? e.message : e)); }
+    catch (e) {
+      if (e && e.zkzQuiet) return;
+      vscode.window.showErrorMessage(String(e && e.message ? e.message : e));
+    }
   };
   context.subscriptions.push(
-    output,
-    vscode.commands.registerCommand('zkz-keil.keilBuild', safe(wrap('build', 'Keil Build'))),
-    vscode.commands.registerCommand('zkz-keil.keilRebuild', safe(wrap('rebuild', 'Keil Rebuild'))),
-    vscode.commands.registerCommand('zkz-keil.keilFlash', safe(wrap('flash', 'J-Link Flash'))),
-    vscode.commands.registerCommand('zkz-keil.prepareCortexDebug', safe(wrap('prepare', 'Prepare Cortex Debug'))),
+    vscode.commands.registerCommand('zkz-keil.keilBuild', safe(() => tasks().runTask('build'))),
+    vscode.commands.registerCommand('zkz-keil.keilRebuild', safe(() => tasks().runTask('rebuild'))),
+    vscode.commands.registerCommand('zkz-keil.keilFlash', safe(() => tasks().runTask('flash'))),
+    vscode.commands.registerCommand('zkz-keil.prepareCortexDebug', safe(() => tasks().runTask('prepare'))),
     vscode.commands.registerCommand('zkz-keil.configureLaunch', safe(async () => {
       const info = require('./keil_launch').writeLaunchJson(resolvePair().root);
       const svd = info.svdFile || 'SVD 未找到';
@@ -435,17 +469,8 @@ function activate(context) {
     vscode.commands.registerCommand('zkz-keil.gdbPath', () => currentGdbPath()),
     vscode.commands.registerCommand('zkz-keil.device', () => currentDebugConfigValue('device')),
     vscode.commands.registerCommand('zkz-keil.svdFile', () => currentDebugConfigValue('svdFile')),
-    vscode.debug.registerDebugConfigurationProvider('cortex-debug', {
-      resolveDebugConfiguration(folder, config) {
-        if (!config || config.type !== 'cortex-debug') return config || undefined;
-        const start = folder && folder.uri ? folder.uri.fsPath : '';
-        const { findProjectRoot } = require('../../shared/project_root');
-        const repo = findProjectRoot(start ? [start] : []) || resolvePair().root;
-        config.serverpath = jlinkGdbServerPath(repo, resolveKeilLayout(repo).flavor);
-        return config;
-      }
-    })
+    vscode.commands.registerCommand('zkz-keil.debugSpeed', () => currentDebugSpeed())
   );
 }
 
-module.exports = { activate, runKeilAction, output, summarizeBuild, normalizeEmitText };
+module.exports = { activate, runKeilAction, summarizeBuild, normalizeEmitText, takeCompleteGbk };

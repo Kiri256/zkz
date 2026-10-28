@@ -89,30 +89,6 @@
     "build_output.txt",
     "flash_output.txt"
   ],
-  "fffdSkipTop": [
-    "libraries",
-    "freertos",
-    "emwin",
-    "modbus_zlg",
-    "fpu_dsp",
-    "rl-arm",
-    "fpga_motion",
-    "project",
-    ".git",
-    "node_modules"
-  ],
-  "fffdTextExtensions": [
-    ".c",
-    ".h",
-    ".cpp",
-    ".hpp",
-    ".cc",
-    ".hh",
-    ".cxx",
-    ".md",
-    ".json",
-    ".txt"
-  ],
   "scanTops": [
     "core",
     "application",

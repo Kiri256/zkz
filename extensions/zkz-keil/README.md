@@ -21,20 +21,20 @@ UV4 / J-Link / FLM / GDB / SVD / 设备名 / 速度 / QSPI 窗口的默认值在
 
 | 命令 | 说明 |
 | --- | --- |
-| `zkz-keil.keilBuild` | 增量编译 |
+| `zkz-keil.keilBuild` | 增量编译，跑任务 Keil Build |
 | `zkz-keil.keilRebuild` | 重新编译 |
-| `zkz-keil.keilFlash` | J-Link 烧录 |
-| `zkz-keil.prepareCortexDebug` | 准备 axf / gdb map |
-| `zkz-keil.configureLaunch` | 配置调试，仅写入 `.vscode/launch.json` |
+| `zkz-keil.keilFlash` | 烧录。状态栏直接开始，不确认机型 |
+| `zkz-keil.prepareCortexDebug` | 准备 axf / gdb map，跑任务 Prepare Cortex Debug |
+| `zkz-keil.configureLaunch` | 配置调试，写入 `.vscode/launch.json` |
 
-打开真源工程时，状态栏有 `zkz-keil`，点击弹出上述命令。
+打开真源工程时，状态栏有 `zkz-keil`，点击可选编译、重新编译、烧录、准备调试、配置调试。日志在任务终端。
 
-`配置调试` 写入「编译调试」和「调试」两条。`device`、`svdFile`、`serverpath`、`gdbPath` 使用命令变量，在启动调试时从 `.zkz/settings.json` 读取；`device` 与 `svdFile` 按当前 `keil.flavor` 选择，`gdbPath` 用 `keil.gdbPath`。调试速度在生成时写入，取 `keil.debugSpeedKHz`（默认 4000）。`svdFile` 为空时，只在 `keil.packRoot` 下找 `STM32F429x.svd` / `STM32F429.svd` 或 `STM32H750.svd` / `STM32H750x.svd`。切换机型后无需重新生成 `launch.json`。
+`配置调试` 写入「编译调试」和「调试」两条。`device`、`svdFile`、`serverpath`、`gdbPath`、调试速度使用命令变量，在启动调试时从 `.zkz/settings.json` 读取；`device` 与 `svdFile` 按当前 `keil.flavor` 选择，`gdbPath` 用 `keil.gdbPath`，速度用 `keil.debugSpeedKHz`（默认 4000，命令 `zkz-keil.debugSpeed`）。`svdFile` 为空时，只在 `keil.packRoot` 下找 `STM32F429x.svd` / `STM32F429.svd` 或 `STM32H750.svd` / `STM32H750x.svd`。切换机型或速度后无需重新生成 `launch.json`。已经写死速度或 `serverpath` 的旧文件，重新执行一次「配置调试」。
 
 路径写在 `.zkz/settings.json`：`keil.uv4Path`、`keil.gdbPath`、`keil.packRoot`，以及当前机型的 `jlinkPath`、`jlinkGdbServerPath`、`svdFile`（H750 另有 `flmPath`）。执行 `zkz-keil.configureLaunch` 只生成或更新 `launch.json`，不会写入设置文件。
 
 `zkz-keil.resolveLayout` 返回当前工程布局，不出现在命令面板。`zkz-code` 使用同一布局模块，不调用此命令。
 
-`launch.json` 的 `preLaunchTask`（`Keil Build`、`J-Link Flash`、`Prepare Cortex Debug` 等）由本包 TaskProvider 提供。工作区 `.vscode/tasks.json` 若还有同名 shell 任务会抢走名字，删掉即可。
+任务列表里有 `Keil Build`（默认生成）、`Build + Flash + Prepare Debug`（编译调试）、`Prepare Cortex Debug`（调试）。重新编译和烧录从状态栏进，不出现在任务列表。工作区 `.vscode/tasks.json` 若还有同名 shell 任务会抢走名字，删掉即可。
 
 调试用工程目录 `.zkz/gdb_source_map.gdb`。

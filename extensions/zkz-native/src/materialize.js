@@ -5,7 +5,7 @@ const path = require('path');
 const { git, gitText, listSourceFiles, catFileBatchSync } = require('./git_exec');
 const { loadTable } = require('./enc_table');
 const { slashRel, isLibRel } = require('./paths');
-const { detectKind, parseMapped } = require('./encoding');
+const { detectKind, parseMapped, applyClean } = require('./encoding');
 const { smudge } = require('./filter_core');
 
 function diskNeedsSmudge(mappedKind, diskKind) {
@@ -183,10 +183,11 @@ function resmudgeStale(repoRoot) {
   return smudgeWorktree(repoRoot).wrote;
 }
 
-/** disable 后按 HEAD 写回原编码。一次 cat-file 批量读，按 autocrlf 补 CRLF，再 add 对齐索引。 */
+/** disable 后把工作区编回原编码。未提交的修改留在工作区，不改用 HEAD 覆盖。 */
 function restoreOriginalStale(repoRoot) {
   const rels = scanMapped(repoRoot, { kinds: ['Gbk', 'Utf8Bom'] });
   if (!rels.length) return { checked: 0, leftover: [] };
+  const table = loadTable(repoRoot);
   const autocrlf = wantsAutocrlf(repoRoot);
   const wrote = [];
   const statOnly = [];
@@ -197,19 +198,34 @@ function restoreOriginalStale(repoRoot) {
     for (let j = 0; j < slice.length; j++) {
       const rec = blobs[j];
       if (!rec || rec.missing) continue;
-      const out = worktreeBytes(rec.data, autocrlf);
-      const abs = path.join(repoRoot, slice[j]);
+      const rel = slice[j];
+      const parsed = parseMapped(table[rel]);
+      const abs = path.join(repoRoot, rel);
+      const head = Buffer.from(rec.data);
       let cur = null;
       try { cur = fs.readFileSync(abs); } catch (_) { cur = null; }
-      if (cur && cur.equals(out)) {
-        if (cur.equals(Buffer.from(rec.data))) statOnly.push(slice[j]);
-        else wrote.push(slice[j]);
-        continue;
+      let soft = false;
+      let cleaned = null;
+      if (cur) {
+        cleaned = applyClean(parsed.kind, cur, {
+          crlf: parsed.crlf,
+          onSoftFail: () => { soft = true; }
+        });
       }
-      try {
-        fs.writeFileSync(abs, out);
-        wrote.push(slice[j]);
-      } catch (_) { /* editor lock */ }
+      if (soft) continue;
+      if (!cleaned) cleaned = head;
+      const out = worktreeBytes(cleaned, autocrlf);
+      if (!(cur && cur.equals(out))) {
+        try {
+          fs.writeFileSync(abs, out);
+          cur = out;
+        } catch (_) {
+          continue;
+        }
+      }
+      if (!cleaned.equals(head)) continue;
+      if (cur && cur.equals(head)) statOnly.push(rel);
+      else wrote.push(rel);
     }
   }
   gitAddChunks(repoRoot, wrote);

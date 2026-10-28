@@ -24,7 +24,7 @@ python .\extensions\package_zkz_native.py
 | 整个项目性能优化计划 | [`docs/performance-optimization-plan.md`](docs/performance-optimization-plan.md) |
 | 扩展打包和扩展间调用 | [`extensions/README.md`](extensions/README.md) |
 | 真源 UTF-8 过滤器、编烧树 | [`extensions/zkz-native/README.md`](extensions/zkz-native/README.md) |
-| 宏表、`#if` 折叠、clangd、FFFD | [`extensions/zkz-code/README.md`](extensions/zkz-code/README.md) |
+| 宏表、`#if` 折叠、clangd | [`extensions/zkz-code/README.md`](extensions/zkz-code/README.md) |
 | Keil 编译、烧录和调试准备 | [`extensions/zkz-keil/README.md`](extensions/zkz-keil/README.md) |
 
 ## 工作区结构
@@ -35,7 +35,7 @@ zkz/
 ├─ docs/                         主题文档
 ├─ extensions/
 │  ├─ zkz-native/                真源 clean/smudge、编码表、编烧树
-│  ├─ zkz-code/                  宏表、#if 折叠、clangd、FFFD
+│  ├─ zkz-code/                  宏表、#if 折叠、clangd
 │  └─ zkz-keil/                  UV4、J-Link、Cortex-Debug
 ├─ scripts/
 │  ├─ do_nothing.js              launch.json 占位
@@ -54,7 +54,7 @@ zkz/
 | 包 | 命令前缀 | 职责 |
 | --- | --- | --- |
 | `zkz-native` | `zkz-native.*` | 真源 clean/smudge、编码表、编烧树 |
-| `zkz-code` | `zkz-code.*` | `yt_version.h` 宏表、未激活 `#if` 折叠、clangd、U+FFFD 检查 |
+| `zkz-code` | `zkz-code.*` | `yt_version.h` 宏表、未激活 `#if` 折叠、clangd |
 | `zkz-keil` | `zkz-keil.*` | Keil UV4 编译/重建、J-Link 烧录、Cortex-Debug 准备 |
 
 各包彼此独立，通过少量公开命令协作；运行时不依赖本目录的 Python 工具。

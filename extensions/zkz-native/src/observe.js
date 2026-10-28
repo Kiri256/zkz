@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   ensureZkz, slashRel, formatLocalNow, atomicWriteJson,
-  roundtripFailPath, filterFailPath, handshakeRejectPath, appendLog
+  roundtripFailPath, filterFailPath, handshakeRejectPath, commitRejectPath, appendLog
 } = require('./paths');
 
 const FILTER_FAIL_LIMIT = 3;
@@ -73,7 +73,15 @@ function loadCp936Drops(repoRoot) {
       if (item.message) messages.push(String(item.message));
       if (item.at && String(item.at) > at) at = String(item.at);
     });
-    return { rel: rel, count: count, stages: stages, message: messages.join('; '), at: at };
+    const positions = [];
+    ['clean', 'smudge'].forEach((stage) => {
+      const item = rec[stage];
+      if (!item || !Array.isArray(item.positions)) return;
+      item.positions.forEach((n) => {
+        if (positions.length < 8 && Number.isFinite(n)) positions.push(n);
+      });
+    });
+    return { rel: rel, count: count, stages: stages, message: messages.join('; '), at: at, positions: positions };
   }).filter((item) => item.count > 0);
 }
 
@@ -211,6 +219,57 @@ function resetFilterFail(repoRoot) {
   } catch (_) { /* ignore */ }
 }
 
+function loadCommitRejects(repoRoot) {
+  const obj = readJson(commitRejectPath(repoRoot), { items: [] });
+  const items = Array.isArray(obj && obj.items) ? obj.items : [];
+  return items.filter((item) => {
+    if (!item || typeof item !== 'object') return false;
+    if (!item.rel) return true;
+    try { return fs.statSync(path.join(repoRoot, item.rel)).isFile(); } catch (err) {
+      return err.code !== 'ENOENT' && err.code !== 'ENOTDIR';
+    }
+  }).map((item) => ({
+    rel: String(item.rel || ''),
+    action: item.action === 'restage' || item.action === 'open' ? item.action : 'message',
+    message: String(item.message || ''),
+    position: Number.isFinite(item.position) ? item.position : undefined
+  }));
+}
+
+function recordCommitReject(repoRoot, actions) {
+  if (!repoRoot) return;
+  try {
+    ensureZkz(repoRoot);
+    const items = (actions || []).map((item) => {
+      const row = {
+        rel: item && item.rel ? String(item.rel) : '',
+        action: item && (item.action === 'restage' || item.action === 'open') ? item.action : 'message',
+        message: item && item.message ? String(item.message) : ''
+      };
+      if (item && Number.isFinite(item.position)) row.position = item.position;
+      return row;
+    });
+    atomicWriteJson(commitRejectPath(repoRoot), { at: formatLocalNow(), items: items });
+  } catch (_) { /* ignore */ }
+}
+
+function clearCommitReject(repoRoot) {
+  if (!repoRoot) return;
+  try {
+    const p = commitRejectPath(repoRoot);
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+  } catch (_) { /* ignore */ }
+}
+
+// 去掉已经处理过的项。action 省略时只去掉重新暂存。
+function dismissCommitReject(repoRoot, rels, action) {
+  const drop = new Set(rels || []);
+  const which = action || 'restage';
+  const left = loadCommitRejects(repoRoot).filter((item) => !(item.action === which && drop.has(item.rel)));
+  if (!left.length) clearCommitReject(repoRoot);
+  else recordCommitReject(repoRoot, left);
+}
+
 function markFilterFailNotified(repoRoot) {
   if (!repoRoot) return;
   try {
@@ -238,5 +297,9 @@ module.exports = {
   recordFilterFail,
   resetFilterFail,
   markFilterFailNotified,
-  recordHandshakeReject
+  recordHandshakeReject,
+  loadCommitRejects,
+  recordCommitReject,
+  clearCommitReject,
+  dismissCommitReject
 };

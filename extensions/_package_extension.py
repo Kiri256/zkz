@@ -63,7 +63,7 @@ def write_version(pkg_json, new_version):
         f.write(new_text)
 
 
-def main(name, files):
+def main(name, files, prune_node_modules=None):
     src = os.path.join(ROOT, name)
     pkg_json = os.path.join(src, "package.json")
     readme = os.path.join(src, "README.md")
@@ -118,6 +118,8 @@ def main(name, files):
                 os.path.join(stage, "node_modules"),
                 ignore=shutil.ignore_patterns(".bin"),
             )
+            if prune_node_modules:
+                prune_node_modules(os.path.join(stage, "node_modules"))
 
         npx = "npx.cmd" if os.name == "nt" else "npx"
         cmd = [

@@ -2,7 +2,7 @@
 
 const path = require('path');
 const vscode = require('vscode');
-const { readHeadName, readHeadOid, gitDirOf } = require('./cc_stamp');
+const { readHeadName, gitDirOf } = require('./cc_stamp');
 
 const DEBOUNCE_MS = 500;
 const POLL_MS = 30000;
@@ -10,7 +10,6 @@ const POLL_MS = 30000;
 function startHeadWatch(context, repoRoot, onChange) {
   if (!repoRoot) return { dispose: function () { } };
   let lastName = readHeadName(repoRoot) || '';
-  let lastOid = readHeadOid(repoRoot) || '';
   let debounceTimer = null;
   let disposed = false;
 
@@ -21,12 +20,10 @@ function startHeadWatch(context, repoRoot, onChange) {
       debounceTimer = null;
       if (disposed) return;
       const name = readHeadName(repoRoot) || '';
-      const oid = readHeadOid(repoRoot) || '';
       if (!name || name === lastName) return;
-      const from = lastOid;
+      const from = lastName;
       lastName = name;
-      if (oid) lastOid = oid;
-      Promise.resolve(onChange({ from: from, to: oid, reason: reason })).catch(() => { });
+      Promise.resolve(onChange({ from: from, to: name, reason: reason })).catch(() => { });
     }, DEBOUNCE_MS);
   };
 

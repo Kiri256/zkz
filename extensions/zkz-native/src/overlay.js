@@ -243,6 +243,31 @@ function restoreOverlay(repoRoot) {
   return { restored: restored };
 }
 
+function fileBytesEqual(a, b) {
+  let left;
+  let right;
+  try { left = fs.readFileSync(a); } catch (_) { return false; }
+  try { right = fs.readFileSync(b); } catch (_) { return false; }
+  return left.equals(right);
+}
+
+// 权威副本相对工作区：missing 还没有副本，same 一致，changed 内容或文件集合不同。
+function overlayDrift(repoRoot) {
+  if (!overlaySeeded(repoRoot)) return 'missing';
+  for (const rel of topLevelRels(overlayList(repoRoot))) {
+    const stored = expandEntries(repoRoot, rel, storePath);
+    const live = expandEntries(repoRoot, rel, wtPath);
+    if (stored.length !== live.length) return 'changed';
+    const liveSet = new Set(live);
+    for (let i = 0; i < stored.length; i++) {
+      const f = stored[i];
+      if (!liveSet.has(f)) return 'changed';
+      if (!fileBytesEqual(storePath(repoRoot, f), wtPath(repoRoot, f))) return 'changed';
+    }
+  }
+  return 'same';
+}
+
 // 是否已有权威副本（用于首次自动 seed 判断）。
 function overlaySeeded(repoRoot) {
   try {
@@ -252,4 +277,4 @@ function overlaySeeded(repoRoot) {
   }
 }
 
-module.exports = { seedOverlay, restoreOverlay, overlaySeeded, storePath, wtPath };
+module.exports = { seedOverlay, restoreOverlay, overlaySeeded, overlayDrift, storePath, wtPath };

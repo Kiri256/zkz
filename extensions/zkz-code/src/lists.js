@@ -16,8 +16,6 @@ const FALLBACK = {
   textExtensions: ['.c', '.h', '.cpp', '.hpp', '.cc', '.hh', '.cxx'],
   excludeDirNames: ['.git', '.svn', '.hg', '.vscode', '.cursor', '.codex', '.claude', '.continue', '.windsurf', '.idea', '.vs', '.cache', '.clangd', '.clangd-index', '.clangd-cache', 'Flash', 'Obj', 'Listings', 'DebugConfig', 'node_modules', '__pycache__', 'ai_dialog', 'tools', '.zkz'],
   excludeFileNames: ['JLinkLog.txt', 'JLinkSettings.ini', 'build_output.txt', 'flash_output.txt'],
-  fffdSkipTop: ['libraries', 'freertos', 'emwin', 'modbus_zlg', 'fpu_dsp', 'rl-arm', 'fpga_motion', 'project', '.git', 'node_modules'],
-  fffdTextExtensions: ['.c', '.h', '.cpp', '.hpp', '.cc', '.hh', '.cxx', '.md', '.json', '.txt'],
   scanTops: ['core', 'application', 'driver', 'User', 'emWin'],
   macroKeys: ['MACHINE_VALUE', 'SCREEN_800_480', 'MALL_DOUBLE', 'MALL_MULTI', 'MALL_EXPAND_AXIS', 'MALL_EXPAND_IO', 'CUSTOMER_SET', 'GROUP_MACHINE', 'MLS_BLOW_SUCTION', 'MLS_610']
 };

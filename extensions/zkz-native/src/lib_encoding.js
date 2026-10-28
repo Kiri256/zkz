@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { detectKind } = require('./encoding');
 const { slashRel, isSourceExt, isLibRel, ensureZkz, formatLocalNow, atomicWriteJson, libEncodingWarnPath } = require('./paths');
-const { catFileBatchSync, gitConfigGet } = require('./git_exec');
+const { catFileBatchSync } = require('./git_exec');
 
 function countFffdBytes(buf) {
   if (!buf || buf.length < 3) return 0;
@@ -94,16 +94,6 @@ function markLibWarningsNotified(repoRoot) {
   } catch (_) { /* ignore */ }
 }
 
-function libEncodingStrict(repoRoot) {
-  if (process.env.ZKZ_LIB_ENCODING_STRICT === '1') return true;
-  try {
-    const v = String(gitConfigGet(repoRoot, 'zkz.libEncodingStrict') || '').trim().toLowerCase();
-    return v === '1' || v === 'true' || v === 'yes';
-  } catch (_) {
-    return false;
-  }
-}
-
 function libSourceRels(repoRoot, rels) {
   const out = [];
   const seen = new Set();
@@ -133,10 +123,7 @@ function inspectLibEncoding(repoRoot, rels, opts) {
   const o = opts || {};
   const mode = o.mode || 'worktree';
   const libs = libSourceRels(repoRoot, rels);
-  if (!libs.length) {
-    if (o.persist) saveLibWarnings(repoRoot, []);
-    return [];
-  }
+  if (!libs.length) return [];
   const heads = catFileBatchSync(repoRoot, libs.map((rel) => 'HEAD:' + rel));
   let news;
   if (mode === 'worktree') {
@@ -160,7 +147,11 @@ function inspectLibEncoding(repoRoot, rels, opts) {
     const hit = judgeLibChange(libs[i], hasOld ? head.data : null, next.data, hasOld);
     if (hit) items.push(hit);
   }
-  if (o.persist !== false) saveLibWarnings(repoRoot, items);
+  if (o.persist !== false) {
+    const checked = new Set(libs);
+    const previous = loadLibWarnings(repoRoot).filter((item) => item && !checked.has(item.rel));
+    saveLibWarnings(repoRoot, previous.concat(items));
+  }
   return items;
 }
 
@@ -176,7 +167,6 @@ module.exports = {
   saveLibWarnings,
   libWarningsNotified,
   markLibWarningsNotified,
-  libEncodingStrict,
   libSourceRels,
   inspectLibEncoding,
   formatLibWarning

@@ -29,9 +29,9 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { parseIntelHex, assertH750HexQspiOnly, jlinkGdbServerPath } = require('../src/keil_flash');
+const { parseIntelHex, assertH750HexQspiOnly, assertF429HexSkipsBoot, jlinkGdbServerPath, createJLinkSink } = require('../src/keil_flash');
 const { discoverFlavor, resolveKeilLayout } = require('../src/keil_layout');
-const { summarizeBuild } = require('../src/keil');
+const { summarizeBuild, takeCompleteGbk } = require('../src/keil');
 
 function ihex(bytes) {
   let sum = 0;
@@ -48,9 +48,21 @@ function writeHex(dir, name, lines) {
 }
 
 let failed = 0;
+const pending = [];
 function test(name, fn) {
   try {
-    fn();
+    const result = fn();
+    if (result && typeof result.then === 'function') {
+      pending.push(result.then(
+        () => { console.log('ok  ' + name); },
+        (e) => {
+          failed += 1;
+          console.log('FAIL ' + name);
+          console.log('  ' + (e && e.stack ? e.stack : e));
+        }
+      ));
+      return;
+    }
     console.log('ok  ' + name);
   } catch (e) {
     failed += 1;
@@ -106,7 +118,7 @@ test('parseIntelHex checksum and length', () => {
 test('parseIntelHex rejects bad checksum', () => {
   let threw = false;
   try { parseIntelHex(':0200000490006B\n'); } catch (e) {
-    threw = /checksum/.test(String(e && e.message ? e.message : e));
+    threw = /校验和/.test(String(e && e.message ? e.message : e));
   }
   assert.ok(threw);
 });
@@ -114,7 +126,7 @@ test('parseIntelHex rejects bad checksum', () => {
 test('parseIntelHex rejects length mismatch', () => {
   let threw = false;
   try { parseIntelHex(':0400000490006A\n'); } catch (e) {
-    threw = /length/.test(String(e && e.message ? e.message : e));
+    threw = /长度/.test(String(e && e.message ? e.message : e));
   }
   assert.ok(threw);
 });
@@ -248,7 +260,9 @@ test('configureLaunch writes flavor device and keeps other configs', () => {
     assert.strictEqual(doc.configurations[0].serverpath, '${command:zkz-keil.jlinkGdbServerPath}');
     assert.strictEqual(doc.configurations[0].gdbPath, '${command:zkz-keil.gdbPath}');
     assert.strictEqual(doc.configurations[0].preLaunchTask, 'zkz-keil: Build + Flash + Prepare Debug');
-    assert.deepStrictEqual(doc.configurations[0].serverArgs, ['-speed', '4000']);
+    assert.deepStrictEqual(doc.configurations[0].serverArgs, ['-speed', '${command:zkz-keil.debugSpeed}']);
+    assert.deepStrictEqual(doc.configurations[0].debuggerArgs, ['-x', '${workspaceFolder}/.zkz/gdb_source_map.gdb']);
+    assert.strictEqual(doc.configurations[0].postStartSessionCommands, undefined);
     assert.strictEqual(doc.configurations[1].name, '调试');
     assert.strictEqual(doc.configurations[1].preLaunchTask, 'zkz-keil: Prepare Cortex Debug');
     assert.strictEqual(doc.configurations[2].name, '其它');
@@ -278,7 +292,7 @@ test('assertH750HexQspiOnly rejects internal flash, no ext addr, type 02', () =>
     try { assertH750HexQspiOnly(internal, null, null); } catch (e) {
       internalMsg = String(e && e.message ? e.message : e);
     }
-    assert.ok(/internal flash/.test(internalMsg), internalMsg);
+    assert.ok(/片内/.test(internalMsg), internalMsg);
 
     const bare = writeHex(dir, 'bare.hex', [
       ihex([0x00, 0x00, 0x00, 0x00]),
@@ -288,7 +302,7 @@ test('assertH750HexQspiOnly rejects internal flash, no ext addr, type 02', () =>
     try { assertH750HexQspiOnly(bare, null, null); } catch (e) {
       bareMsg = String(e && e.message ? e.message : e);
     }
-    assert.ok(/extended linear address/.test(bareMsg), bareMsg);
+    assert.ok(/扩展线性地址/.test(bareMsg), bareMsg);
 
     const seg = writeHex(dir, 'seg.hex', [
       qspi,
@@ -299,15 +313,64 @@ test('assertH750HexQspiOnly rejects internal flash, no ext addr, type 02', () =>
     try { assertH750HexQspiOnly(seg, null, null); } catch (e) {
       segMsg = String(e && e.message ? e.message : e);
     }
-    assert.ok(/type 02/.test(segMsg), segMsg);
+    assert.ok(/类型 02/.test(segMsg), segMsg);
 
     const okHex = writeHex(dir, 'ok.hex', [qspi, eof]);
     let logged = '';
     assertH750HexQspiOnly(okHex, (m) => { logged += m; }, null);
     assert.ok(/QSPI/.test(logged), logged);
+
+    const early = writeHex(dir, 'early.hex', [
+      ihex([0x01, 0x00, 0x00, 0x00, 0x11]),
+      qspi,
+      eof
+    ]);
+    let earlyMsg = '';
+    try { assertH750HexQspiOnly(early, null, null); } catch (e) {
+      earlyMsg = String(e && e.message ? e.message : e);
+    }
+    assert.ok(/扩展地址之前有数据/.test(earlyMsg), earlyMsg);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('assertF429HexSkipsBoot rejects boot and accepts the app', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-f429-hex-'));
+  const eof = ihex([0x00, 0x00, 0x00, 0x01]);
+  const ela = ihex([0x02, 0x00, 0x00, 0x04, 0x08, 0x00]);
+  try {
+    const boot = writeHex(dir, 'boot.hex', [
+      ela,
+      ihex([0x01, 0x00, 0x00, 0x00, 0x11]),
+      eof
+    ]);
+    let bootMsg = '';
+    try { assertF429HexSkipsBoot(boot, null); } catch (e) {
+      bootMsg = String(e && e.message ? e.message : e);
+    }
+    assert.ok(/0x08000000/.test(bootMsg), bootMsg);
+
+    const app = writeHex(dir, 'app.hex', [
+      ela,
+      ihex([0x01, 0xC0, 0x00, 0x00, 0x22]),
+      eof
+    ]);
+    let logged = '';
+    assertF429HexSkipsBoot(app, (m) => { logged += m; });
+    assert.ok(/0x0800BFFF/.test(logged), logged);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('takeCompleteGbk holds a trailing GBK lead byte', () => {
+  const split = takeCompleteGbk(Buffer.from([0x41, 0xB2]));
+  assert.deepStrictEqual(Array.from(split.done), [0x41]);
+  assert.deepStrictEqual(Array.from(split.rest), [0xB2]);
+  const whole = takeCompleteGbk(Buffer.concat([split.rest, Buffer.from([0xE2, 0x42])]));
+  assert.deepStrictEqual(Array.from(whole.done), [0xB2, 0xE2, 0x42]);
+  assert.strictEqual(whole.rest.length, 0);
 });
 
 test('summarizeBuild maps keil exit codes', () => {
@@ -326,32 +389,40 @@ test('summarizeBuild maps keil exit codes', () => {
   try {
     const c0 = run(0, '');
     assert.strictEqual(c0.exitCode, 0);
-    assert.ok(/BUILD SUCCESS \(0 warnings\)/.test(c0.text), c0.text);
+    assert.ok(/编译成功（无警告）/.test(c0.text), c0.text);
     const c1 = run(1, '');
     assert.strictEqual(c1.exitCode, 0);
-    assert.ok(/BUILD SUCCESS \(with warnings\)/.test(c1.text), c1.text);
+    assert.ok(/编译成功（有警告）/.test(c1.text), c1.text);
     const c2 = run(2, 'main.c(1): error: boom\n');
     assert.strictEqual(c2.exitCode, 1);
-    assert.ok(/BUILD FAILED \(errors\)/.test(c2.text), c2.text);
+    assert.ok(/编译失败（有错误）/.test(c2.text), c2.text);
     const c3 = run(3, '');
     assert.strictEqual(c3.exitCode, 1);
-    assert.ok(/BUILD FAILED \(fatal errors\)/.test(c3.text), c3.text);
+    assert.ok(/编译失败（致命错误）/.test(c3.text), c3.text);
     const clog = run(4, 'main.c(1): error: boom\n');
     assert.strictEqual(clog.exitCode, 1);
-    assert.ok(/BUILD FAILED \(errors in log\)/.test(clog.text), clog.text);
+    assert.ok(/编译失败（日志里有错误）/.test(clog.text), clog.text);
     const cwarn = run(4, 'main.c(2): warning: note\n');
     assert.strictEqual(cwarn.exitCode, 0);
-    assert.ok(/BUILD SUCCESS \(with warnings\)/.test(cwarn.text), cwarn.text);
+    assert.ok(/编译成功（有警告）/.test(cwarn.text), cwarn.text);
+    assert.ok(c2.text.indexOf('---------- 编译摘要 ----------') >= 0, c2.text);
+    assert.ok(c2.text.indexOf('main.c(1): error: boom') >= 0, c2.text);
+    assert.ok(c2.text.indexOf('[错误]') < 0, c2.text);
+    assert.ok(cwarn.text.indexOf('main.c(2): warning: note') >= 0, cwarn.text);
 
     const root = path.join(dir, 'ws');
     const proj = path.join(root, '.zkz', 'keil-native', 'Project', 'MDK-ARM(uV4)');
     const src = path.join(root, '.zkz', 'keil-native', 'fpga_motion', 'run_function.h');
-    const body = src + '(424): error: #147: declared at line 26 of "..\\..\\driver\\motion\\axis\\inc\\yt_axis_buffer.h"\n';
+    const body = src + '(424): error: #147: declared at line 26 of "..\\..\\driver\\motion\\axis\\inc\\yt_axis_buffer.h"\n'
+      + 'main.c(3): warning: note\n';
     fs.writeFileSync(logFile, body, 'utf8');
     const lines2 = [];
     const mapped = summarizeBuild(logFile, proj, 2, (m) => lines2.push(String(m)));
     const shown = lines2.join('\n');
     assert.strictEqual(mapped, 1);
+    const errAt = shown.indexOf('(424): error:');
+    const warnAt = shown.indexOf('main.c(3): warning: note');
+    assert.ok(errAt >= 0 && warnAt > errAt, shown);
     assert.ok(shown.indexOf(path.join(root, 'fpga_motion', 'run_function.h')) >= 0, shown);
     assert.ok(shown.indexOf(path.join(root, 'driver', 'motion', 'axis', 'inc', 'yt_axis_buffer.h')) >= 0, shown);
     assert.ok(shown.toLowerCase().indexOf('keil-native') < 0, shown);
@@ -360,8 +431,109 @@ test('summarizeBuild maps keil exit codes', () => {
   }
 });
 
-if (failed) {
-  console.log('\n' + failed + ' failed');
-  process.exit(1);
+test('jlink sink reports stage percent and logs one line per finished bar', () => {
+  const lines = [];
+  const messages = [];
+  const sink = createJLinkSink(
+    (s) => lines.push(s),
+    { report(p) { messages.push(p.message); } }
+  );
+  sink.push('Info: Found SWD-DP with ID 0x2BA01477\n');
+  sink.push('Info: Device "STM32F429BI" selected.\n');
+  sink.push('Comparing flash   [....................] 12%\r');
+  sink.push('Comparing flash   [##########..........] 40%\r');
+  sink.push('Comparing flash   [####################] 100%\r\n');
+  sink.push('Programming flash [#####...............] 20%\rProgramming flash [####################] 100%\r\n');
+  sink.push('ERROR: Programming failed\n');
+  sink.end();
+  assert.deepStrictEqual(lines.filter((l) => /Comparing flash/.test(l)), [
+    'Comparing flash   [####################] 100%'
+  ]);
+  assert.deepStrictEqual(lines.filter((l) => /Programming flash/.test(l)), [
+    'Programming flash [####################] 100%'
+  ]);
+  assert.ok(lines.some((l) => l.indexOf('ERROR: Programming failed') >= 0));
+  assert.ok(lines.some((l) => l.indexOf('Found SWD-DP') >= 0));
+  assert.deepStrictEqual(messages, [
+    '已连接',
+    '比较 12%',
+    '比较 40%',
+    '比较 100%',
+    '编程 20%',
+    '编程 100%'
+  ]);
+});
+
+test('jlink sink does not invent a percent when Commander prints none', () => {
+  const lines = [];
+  const messages = [];
+  const sink = createJLinkSink(
+    (s) => lines.push(s),
+    { report(p) { messages.push(p.message); } }
+  );
+  sink.push('Info: Found SWD-DP with ID 0x2BA01477\n');
+  sink.push('O.K.\n');
+  sink.push('Downloading file [C:/output.hex]...\n');
+  assert.deepStrictEqual(messages, ['已连接', '下载']);
+  sink.push('Info: J-Link: Flash download: Flash programming performed for 1 range (49152 bytes)\n');
+  sink.end();
+  assert.deepStrictEqual(messages, ['已连接', '下载', '完成']);
+  assert.ok(lines.some((l) => l.indexOf('Downloading file') === 0));
+  assert.ok(!lines.some((l) => l.indexOf('Downloading file') >= 0 && l.indexOf('Flash programming performed') >= 0));
+  assert.ok(lines.some((l) => l === 'O.K.'));
+  assert.ok(!messages.some((m) => /%/.test(m)));
+});
+
+test('capture keeps a zero exit when not cancelled', () => {
+  const { runCaptured } = require('../src/keil_flash');
+  return runCaptured(process.execPath, ['-e', 'process.exit(0)'], process.cwd(), () => { }, null, null)
+    .then((result) => { assert.strictEqual(result.code, 0); });
+});
+
+test('cancelled capture rejects even when the process exits 0', () => {
+  const { runCaptured } = require('../src/keil_flash');
+  const token = {
+    isCancellationRequested: true,
+    onCancellationRequested() { return { dispose() { } }; }
+  };
+  return runCaptured(process.execPath, ['-e', 'process.exit(0)'], process.cwd(), () => { }, token, null).then(
+    () => { throw new Error('zero exit was kept'); },
+    (err) => { assert.strictEqual(err.message, '已取消'); }
+  );
+});
+
+test('cancelling a live capture rejects instead of keeping exit 0', () => {
+  const { runCaptured } = require('../src/keil_flash');
+  let cancel = null;
+  const token = {
+    isCancellationRequested: false,
+    onCancellationRequested(fn) {
+      cancel = fn;
+      return { dispose() { cancel = null; } };
+    }
+  };
+  const running = runCaptured(
+    process.execPath,
+    ['-e', 'setTimeout(() => process.exit(0), 5000)'],
+    process.cwd(),
+    () => { },
+    token,
+    null
+  );
+  setTimeout(() => { if (cancel) cancel(); }, 40);
+  return running.then(
+    () => { throw new Error('exit 0 was kept after cancel'); },
+    (err) => { assert.strictEqual(err.message, '已取消'); }
+  );
+});
+
+function finish() {
+  if (failed) {
+    console.log('\n' + failed + ' failed');
+    process.exit(1);
+  }
+  console.log('\nall passed');
 }
-console.log('\nall passed');
+
+if (pending.length) Promise.all(pending).then(finish, finish);
+else finish();

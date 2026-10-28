@@ -32,8 +32,7 @@ function resolveKeilLayout(root, options) {
       projectFile: projectFile,
       defaultTarget: target,
       relAxf: path.join('H750', 'Projects', 'MDK-ARM', 'Flash', 'Obj', 'output.axf'),
-      relHex: path.join('H750', 'Projects', 'MDK-ARM', 'Flash', 'Obj', 'output.hex'),
-      relMap: path.join('H750', 'Projects', 'MDK-ARM', 'Flash', '.zkz', 'gdb_source_map.gdb')
+      relHex: path.join('H750', 'Projects', 'MDK-ARM', 'Flash', 'Obj', 'output.hex')
     };
   }
   const mdk = path.join(root, 'Project', 'MDK-ARM(uV4)');
@@ -48,8 +47,7 @@ function resolveKeilLayout(root, options) {
     projectFile: projectFile,
     defaultTarget: target,
     relAxf: path.join('Project', 'MDK-ARM(uV4)', 'Flash', 'Obj', 'output.axf'),
-    relHex: path.join('Project', 'MDK-ARM(uV4)', 'Flash', 'Obj', 'output.hex'),
-    relMap: path.join('Project', 'MDK-ARM(uV4)', 'Flash', '.zkz', 'gdb_source_map.gdb')
+    relHex: path.join('Project', 'MDK-ARM(uV4)', 'Flash', 'Obj', 'output.hex')
   };
 }
 

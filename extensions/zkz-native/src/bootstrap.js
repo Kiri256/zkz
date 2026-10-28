@@ -6,7 +6,8 @@ const { buildTable, loadTable, loadMeta, countByKind, noteTableRef } = require('
 const { installGitConfig, uninstallGitConfig, isInstalled } = require('./git_config');
 const { installHooks, uninstallHooks } = require('./hooks');
 const { atomicWriteJson, nativeStatusPath, ensureZkz, formatLocalNow } = require('./paths');
-const { loadRoundtripFailures, loadCp936Drops, loadFilterFail } = require('./observe');
+const { loadRoundtripFailures, loadCp936Drops, loadFilterFail, loadCommitRejects, FILTER_FAIL_LIMIT } = require('./observe');
+const { reconcileCommitReject } = require('./precommit');
 const { loadLibWarnings, libWarningsNotified } = require('./lib_encoding');
 const {
   diskNeedsSmudge,
@@ -25,6 +26,87 @@ function tableDrift(repoRoot) {
   }
   const name = readHeadName(repoRoot);
   return !!(name && meta.ref !== name);
+}
+
+function charPos(message) {
+  const m = /at (\d+)/.exec(String(message || ''));
+  return m ? Number(m[1]) : undefined;
+}
+
+// 状态栏只表示过滤器开或关。编码和库的问题留在悬停和菜单里。
+function barLabel(st) {
+  if (!st || !st.installed) return 'native 关';
+  return 'native 开';
+}
+
+// 和状态栏悬停同一份文件名，启用和刷新写到输出。
+function statusLines(st) {
+  const lines = ['编码表 ' + ((st && st.tableCount) || 0) + ' 项'];
+  if (st && st.roundtripFails && st.roundtripFails.length) lines.push('编不回: ' + st.roundtripFails.slice(0, 8).join('、'));
+  if (st && st.cp936Drops && st.cp936Drops.length) lines.push('丢掉字符: ' + st.cp936Drops.slice(0, 8).join('、'));
+  ((st && st.commitRejects) || []).slice(0, 6).forEach((it) => {
+    if (it && it.message) lines.push(it.message);
+  });
+  if (st && st.unstable && st.unstable.length) lines.push('未对齐: ' + st.unstable.slice(0, 8).join('、'));
+  const libs = (st && st.libWarnings) || [];
+  if (libs.length) lines.push('库编码: ' + libs.slice(0, 8).map((it) => it.rel).join('、'));
+  if (st && (st.filterFails || 0) >= FILTER_FAIL_LIMIT) lines.push('过滤器连续失败，Git 可能不可用');
+  if (st && st.tableDrift) lines.push('编码表对应的分支已变，将自动刷新');
+  return lines;
+}
+
+// 菜单第一项用的动作：能编回的重新暂存，写不回的打开文件。
+function encodingActions(st) {
+  const rejects = (st && st.commitRejects) || [];
+  const restage = [];
+  const opens = [];
+  const notes = [];
+  const seen = new Set();
+  rejects.forEach((item) => {
+    if (!item) return;
+    if (item.action === 'restage' && item.rel) {
+      restage.push(item);
+      seen.add(item.rel);
+      return;
+    }
+    if (item.action === 'open' && item.rel) {
+      opens.push(item);
+      seen.add(item.rel);
+      return;
+    }
+    if (item.message) notes.push(item);
+  });
+  const fails = (st && st.roundtripItems) || [];
+  fails.forEach((item) => {
+    const rel = item && item.rel;
+    if (!rel || seen.has(rel)) return;
+    seen.add(rel);
+    opens.push({
+      rel: rel,
+      action: 'open',
+      message: item.message || (rel + ' 编不回 GBK'),
+      position: charPos(item.message)
+    });
+  });
+  const drops = (st && st.cp936DropItems) || [];
+  drops.forEach((item) => {
+    const rel = item && item.rel;
+    if (!rel || seen.has(rel)) return;
+    seen.add(rel);
+    const pos = Array.isArray(item.positions) && item.positions.length ? item.positions[0] : charPos(item.message);
+    opens.push({
+      rel: rel,
+      action: 'open',
+      message: item.message || (rel + ' 丢掉了字符'),
+      position: pos
+    });
+  });
+  const unstable = ((st && st.unstable) || []).filter((rel) => rel && !seen.has(rel));
+  return { restage: restage, opens: opens, notes: notes, unstable: unstable };
+}
+
+function commitRejectsOf(repoRoot) {
+  try { return reconcileCommitReject(repoRoot); } catch (_) { return loadCommitRejects(repoRoot); }
 }
 
 function statusSnapshot(repoRoot) {
@@ -48,7 +130,10 @@ function statusSnapshot(repoRoot) {
     counts: countByKind(files),
     unstable: unstable,
     roundtripFails: roundtripFails.map((x) => x.rel),
+    roundtripItems: roundtripFails,
     cp936Drops: cp936Drops.map((x) => x.rel),
+    cp936DropItems: cp936Drops,
+    commitRejects: commitRejectsOf(repoRoot),
     tableDrift: tableDrift(repoRoot),
     filterFails: ff.count,
     filterFailLast: ff.last,
@@ -142,6 +227,9 @@ module.exports = {
   refresh,
   silentRefresh,
   statusSnapshot,
+  barLabel,
+  statusLines,
+  encodingActions,
   resmudgeStale,
   diskNeedsSmudge,
   restoreOriginalStale,

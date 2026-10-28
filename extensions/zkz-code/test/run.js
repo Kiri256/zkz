@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('assert');
-const { evalPpExpr, parseCInt } = require('../src/pp_expr');
+const { evalPpExpr, evalPpExprResult, parseCInt } = require('../src/pp_expr');
 
 let failed = 0;
 function test(name, fn) {
@@ -38,6 +38,9 @@ test('shift and not', () => {
   assert.strictEqual(evalPpExpr('1 << 3', {}), true);
   assert.strictEqual(evalPpExpr('(1 << 3) == 8', {}), true);
   assert.strictEqual(evalPpExpr('~0', {}), true);
+  assert.strictEqual(evalPpExpr('(1 << 31) > 0', {}), true);
+  assert.strictEqual(evalPpExpr('(1 << 40) == 256', {}), false);
+  assert.strictEqual(evalPpExpr('(1 << 40) == 1099511627776', {}), true);
 });
 
 test('ternary A ? B : C', () => {
@@ -46,7 +49,7 @@ test('ternary A ? B : C', () => {
   assert.strictEqual(evalPpExpr('A ? 0 : 1', { A: '1' }), false);
 });
 
-test('logical or and and do not skip the other side', () => {
+test('logical or and and skip the dead side', () => {
   assert.strictEqual(evalPpExpr('1 || 0', {}), true);
   assert.strictEqual(evalPpExpr('0 || 1', {}), true);
   assert.strictEqual(evalPpExpr('0 || 0', {}), false);
@@ -55,6 +58,14 @@ test('logical or and and do not skip the other side', () => {
   assert.strictEqual(evalPpExpr('(0 && 1) || 1', {}), true);
   assert.strictEqual(evalPpExpr('MLS_610 || MLS_510', { MLS_610: '1', MLS_510: '0' }), true);
   assert.strictEqual(evalPpExpr('A || B', { A: '0', B: '0' }), false);
+  assert.strictEqual(evalPpExprResult("0 && (FLAGS == 'x')", { FLAGS: '1' }).ok, true);
+  assert.strictEqual(evalPpExpr("0 && (FLAGS == 'x')", { FLAGS: '1' }), false);
+  assert.strictEqual(evalPpExpr("1 || (FLAGS == 'x')", { FLAGS: '1' }), true);
+  assert.strictEqual(evalPpExpr("0 ? (FLAGS == 'x') : 1", { FLAGS: '1' }), true);
+  assert.strictEqual(evalPpExpr("1 ? 1 : (FLAGS == 'x')", { FLAGS: '1' }), true);
+  assert.strictEqual(evalPpExpr('0 && (1 << 80)', {}), false);
+  assert.strictEqual(evalPpExpr('1 || (1 << 80)', {}), true);
+  assert.strictEqual(evalPpExprResult("1 && (FLAGS == 'x')", { FLAGS: '1' }).ok, false);
 });
 
 test('existing equality and defined', () => {
@@ -70,34 +81,11 @@ test('unsupported syntax is false not a partial value', () => {
   assert.strictEqual(evalPpExpr("FLAGS == 'x'", { FLAGS: '1' }), false);
 });
 
-test('readHeadOid loose ref and packed-refs', () => {
-  const os = require('os');
-  const path = require('path');
-  const fs = require('fs');
-  const { readHeadOid } = require('../src/cc_stamp');
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-head-'));
-  const git = path.join(root, '.git');
-  const oid = '0123456789abcdef0123456789abcdef01234567';
-  const packed = 'fedcba9876543210fedcba9876543210fedcba98';
-  try {
-    fs.mkdirSync(path.join(git, 'refs', 'heads'), { recursive: true });
-    fs.writeFileSync(path.join(git, 'refs', 'heads', 'main'), oid + '\n', 'utf8');
-    fs.writeFileSync(path.join(git, 'HEAD'), 'ref: refs/heads/main\n', 'utf8');
-    assert.strictEqual(readHeadOid(root), oid);
-    fs.rmSync(path.join(git, 'refs', 'heads', 'main'));
-    fs.writeFileSync(path.join(git, 'HEAD'), 'ref: refs/heads/packed\n', 'utf8');
-    fs.writeFileSync(path.join(git, 'packed-refs'), packed + ' refs/heads/packed\n', 'utf8');
-    assert.strictEqual(readHeadOid(root), packed);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
 test('readHeadName ignores same-branch commit and undo', () => {
   const os = require('os');
   const path = require('path');
   const fs = require('fs');
-  const { readHeadName, readHeadOid } = require('../src/cc_stamp');
+  const { readHeadName } = require('../src/cc_stamp');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-headname-'));
   const git = path.join(root, '.git');
   const oid = '0123456789abcdef0123456789abcdef01234567';
@@ -109,7 +97,6 @@ test('readHeadName ignores same-branch commit and undo', () => {
     assert.strictEqual(readHeadName(root), 'refs/heads/main');
     fs.writeFileSync(path.join(git, 'refs', 'heads', 'main'), next + '\n', 'utf8');
     assert.strictEqual(readHeadName(root), 'refs/heads/main');
-    assert.strictEqual(readHeadOid(root), next);
     fs.writeFileSync(path.join(git, 'HEAD'), 'ref: refs/heads/dev\n', 'utf8');
     assert.strictEqual(readHeadName(root), 'refs/heads/dev');
     fs.writeFileSync(path.join(git, 'HEAD'), next + '\n', 'utf8');
@@ -140,42 +127,11 @@ test('loadMacroTable reuses disk cache until mtime changes', () => {
     const c = loadMacroTable({ workspaceRoot: dir, filePath: ver });
     assert.notStrictEqual(c, a);
     assert.strictEqual(c.macros.MACHINE_VALUE, '1');
-    const published = JSON.parse(fs.readFileSync(path.join(dir, '.zkz', 'run', 'macro-table.json'), 'utf8'));
-    assert.strictEqual(published.ready, true);
-    assert.strictEqual(published.macros.MACHINE_VALUE, '1');
-    assert.strictEqual(published.macros.MLS, '1');
-    assert.ok(published.count >= 2);
+    assert.strictEqual(c.macros.MLS, '1');
+    assert.strictEqual(fs.existsSync(path.join(dir, '.zkz', 'run', 'macro-table.json')), false);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
-});
-
-test('loadMacroTable removes macro-table.json when yt_version.h is absent', () => {
-  const os = require('os');
-  const path = require('path');
-  const fs = require('fs');
-  const { loadMacroTable, invalidateMacroTable } = require('../src/macros');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-nomac-'));
-  const runFile = path.join(dir, '.zkz', 'run', 'macro-table.json');
-  const oldFile = path.join(dir, '.zkz', 'macro-table.json');
-  try {
-    fs.mkdirSync(path.dirname(runFile), { recursive: true });
-    fs.writeFileSync(runFile, '{"ready":true}\n', 'utf8');
-    fs.writeFileSync(oldFile, '{"ready":true}\n', 'utf8');
-    invalidateMacroTable();
-    const table = loadMacroTable({ workspaceRoot: dir });
-    assert.strictEqual(table.ready, false);
-    assert.strictEqual(fs.existsSync(runFile), false);
-    assert.strictEqual(fs.existsSync(oldFile), false);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('countFffdText counts U+FFFD', () => {
-  const { countFffdText } = require('../src/fffd');
-  assert.strictEqual(countFffdText('ok'), 0);
-  assert.strictEqual(countFffdText('a\uFFFDb\uFFFD'), 2);
 });
 
 test('uvproj target becomes compile_commands', () => {
@@ -219,6 +175,42 @@ test('uvproj target becomes compile_commands', () => {
   ]);
 });
 
+test('compile_commands walks nested groups and appends file defines', () => {
+  const path = require('path');
+  const { buildCompileCommands } = require('../src/compile_commands');
+  const mdk = path.join('E:', 'proj', 'MDK');
+  const xml = [
+    '<Project><Targets><Target><TargetName>Flash</TargetName>',
+    '<TargetOption><Cads><VariousControls>',
+    '<Define>BASE</Define><IncludePath>..\\inc</IncludePath>',
+    '</VariousControls></Cads></TargetOption>',
+    '<Groups><Group><GroupName>app</GroupName><Files>',
+    '<File><FileType>1</FileType><FilePath>top.c</FilePath></File>',
+    '</Files><Groups><Group><GroupName>sub</GroupName><Files>',
+    '<File><FileType>1</FileType><FilePath>nested.c</FilePath>',
+    '<FileOption><FileArmAds><Cads><VariousControls>',
+    '<Define>FILE_ONLY=1</Define><Undefine>OLDFILE</Undefine>',
+    '<IncludePath>..\\fileinc</IncludePath>',
+    '</VariousControls></Cads></FileArmAds></FileOption></File>',
+    '<File><FileType>1</FileType><FilePath>off.c</FilePath>',
+    '<FileOption><CommonProperty><IncludeInBuild>0</IncludeInBuild></CommonProperty></FileOption></File>',
+    '</Files></Group></Groups></Group></Groups></Target></Targets></Project>'
+  ].join('');
+  const built = buildCompileCommands(xml, mdk, 'Flash');
+  assert.strictEqual(built.entries.length, 2);
+  assert.strictEqual(built.entries[0].file, 'E:\\proj\\MDK\\top.c');
+  assert.deepStrictEqual(built.entries[0].arguments, ['clang', '-IE:\\proj\\inc', '-DBASE']);
+  assert.strictEqual(built.entries[1].file, 'E:\\proj\\MDK\\nested.c');
+  assert.deepStrictEqual(built.entries[1].arguments, [
+    'clang',
+    '-IE:\\proj\\inc',
+    '-DBASE',
+    '-IE:\\proj\\fileinc',
+    '-UOLDFILE',
+    '-DFILE_ONLY=1'
+  ]);
+});
+
 test('Keil XML supports attributes, comments, CDATA, numeric entities and nested targets', () => {
   const { buildCompileCommands } = require('../src/compile_commands');
   const xml = '<Project><Targets><Target id="flash"><TargetName>Fl&#97;sh</TargetName>' +
@@ -238,7 +230,7 @@ test('Keil XML supports attributes, comments, CDATA, numeric entities and nested
     (err) => err.code === 'ZKZ_NO_TARGET');
 });
 
-test('compile cache handles memory hits, relocation, XML changes and corrupt disk data', () => {
+test('compile_commands reparses and skips identical writes', () => {
   const fs = require('fs');
   const os = require('os');
   const path = require('path');
@@ -257,23 +249,15 @@ test('compile cache handles memory hits, relocation, XML changes and corrupt dis
     const xml = '<Project><Targets><Target><TargetName>Flash</TargetName><Groups><Group><Files><File><FileType>1</FileType><FilePath>../../User/main.c</FilePath></File></Files></Group></Groups></Target></Targets></Project>';
     fs.writeFileSync(project, xml);
     await cc.refreshCompileCommands(root, { force: true });
-    const cache = path.join(root, '.zkz', 'run', 'compile-commands-cache.json');
-    const originalRead = fs.readFileSync;
+    assert.ok(!fs.existsSync(path.join(root, '.zkz', 'run', 'compile-commands-cache.json')));
     const originalWrite = fs.writeFileSync;
     let outputWrites = 0;
     fs.writeFileSync = function (p, ...args) {
       if (path.basename(p) === 'compile_commands.json') outputWrites++;
       return originalWrite.call(this, p, ...args);
     };
-    let reads = 0;
-    fs.readFileSync = function (p, ...args) {
-      if (p === cache) reads++;
-      return originalRead.call(this, p, ...args);
-    };
     await cc.refreshCompileCommands(root, { force: true });
-    fs.readFileSync = originalRead;
     fs.writeFileSync = originalWrite;
-    assert.strictEqual(reads, 0);
     assert.strictEqual(outputWrites, 0);
     const output = path.join(root, 'compile_commands.json');
     fs.writeFileSync(output, 'corrupted');
@@ -284,11 +268,8 @@ test('compile cache handles memory hits, relocation, XML changes and corrupt dis
     assert.ok(fs.existsSync(output));
     const moved = path.join(root, 'moved');
     const movedMdk = path.join(moved, 'Project', 'MDK-ARM(uV4)');
-    const movedRun = path.join(moved, '.zkz', 'run');
     fs.mkdirSync(movedMdk, { recursive: true });
-    fs.mkdirSync(movedRun, { recursive: true });
     fs.writeFileSync(path.join(movedMdk, 'b_01.uvproj'), xml);
-    fs.copyFileSync(cache, path.join(movedRun, 'compile-commands-cache.json'));
     await cc.refreshCompileCommands(moved, { force: true });
     let entries = JSON.parse(fs.readFileSync(path.join(moved, 'compile_commands.json')));
     assert.strictEqual(entries[0].directory, movedMdk);
@@ -297,33 +278,11 @@ test('compile cache handles memory hits, relocation, XML changes and corrupt dis
     await cc.refreshCompileCommands(root, { force: true });
     entries = JSON.parse(fs.readFileSync(path.join(root, 'compile_commands.json')));
     assert.strictEqual(entries[0].file, path.join(root, 'User', 'changed.c'));
-    const row = JSON.parse(fs.readFileSync(cache));
-    row.text = 'invalid JSON';
-    fs.writeFileSync(cache, JSON.stringify(row));
-    delete require.cache[require.resolve(modulePath)];
-    await require(modulePath).refreshCompileCommands(root, { force: true });
-    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(root, 'compile_commands.json')))[0].file, entries[0].file);
   };
   try {
     const r = spawnSync(process.execPath, ['-e', '(' + script.toString() + ')().catch(e => { console.error(e); process.exitCode = 1; })', root, require.resolve('../src/compile_commands')], { windowsHide: true, encoding: 'utf8' });
     assert.strictEqual(r.status, 0, r.stderr);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
-});
-
-test('index snapshot stays put across a save', () => {
-  const { retainIndexSnapshot } = require('../src/macros');
-  let indexed = {};
-  let seen = {};
-  const started = { MACHINE_VALUE: '1', MALL_DOUBLE: '0' };
-  indexed = retainIndexSnapshot(indexed, seen, started);
-  seen = started;
-  const saved = { MACHINE_VALUE: '2', MALL_DOUBLE: '0' };
-  indexed = retainIndexSnapshot(indexed, seen, saved);
-  seen = saved;
-  assert.strictEqual(indexed.MACHINE_VALUE, '1');
-  assert.strictEqual(seen.MACHINE_VALUE, '2');
-  indexed = saved;
-  assert.strictEqual(indexed.MACHINE_VALUE, '2');
 });
 
 function installVscodeStub() {
@@ -383,25 +342,90 @@ test('collectPpBranches if ifdef ifndef elif else nested unknown', () => {
   assert.deepStrictEqual(brief('#if UNKNOWN_MACRO\nx\n#endif\n', { FOO: '1' }), [
     { kind: 'if', start: 0, end: 1, active: false, unknown: true }
   ]);
+  assert.deepStrictEqual(brief('#if UNKNOWN\na\n#elif 0\nb\n#else\nc\n#endif\n', {}), [
+    { kind: 'if', start: 0, end: 1, active: false, unknown: true },
+    { kind: 'elif', start: 2, end: 3, active: false, unknown: false },
+    { kind: 'else', start: 4, end: 5, active: false, unknown: true }
+  ]);
+  assert.deepStrictEqual(brief("#if FLAGS == 'x'\na\n#else\nb\n#endif\n", { FLAGS: '1' }), [
+    { kind: 'if', start: 0, end: 1, active: false, unknown: true },
+    { kind: 'else', start: 2, end: 3, active: false, unknown: true }
+  ]);
+  assert.deepStrictEqual(brief('#define FOO 0\n#if FOO\ny\n#endif\n', {}), [
+    { kind: 'if', start: 1, end: 2, active: false, unknown: false }
+  ]);
+  assert.deepStrictEqual(brief('#if UNKNOWN\n#define FOO 0\n#endif\n#if FOO\nx\n#endif\n', { FOO: '1' }), [
+    { kind: 'if', start: 0, end: 1, active: false, unknown: true },
+    { kind: 'if', start: 3, end: 4, active: false, unknown: true }
+  ]);
+  assert.deepStrictEqual(brief('#if 0\n#define FOO 0\n#endif\n#if FOO\nx\n#endif\n', { FOO: '1' }), [
+    { kind: 'if', start: 0, end: 1, active: false, unknown: false },
+    { kind: 'if', start: 3, end: 4, active: true, unknown: false }
+  ]);
+  assert.deepStrictEqual(brief("#if 0 && (FLAGS == 'x')\na\n#else\nb\n#endif\n", { FLAGS: '1' }), [
+    { kind: 'if', start: 0, end: 1, active: false, unknown: false },
+    { kind: 'else', start: 2, end: 3, active: true, unknown: false }
+  ]);
+
+  const { selectFoldTargets, foldDelta } = require('../src/ifdef_fold');
+  const wide = '#if 0\n' + 'a\n'.repeat(20) + '#endif\n';
+  const wideTargets = selectFoldTargets(collectPpBranches(wide, {}));
+  assert.deepStrictEqual(wideTargets.inactive, [0]);
+  assert.deepStrictEqual(foldDelta(null, [0, 4], false), { reopen: [], toFold: [0, 4] });
+  assert.deepStrictEqual(foldDelta([0, 4], [0, 9], false), { reopen: [4], toFold: [9] });
+  assert.deepStrictEqual(foldDelta([0, 4], [0, 9], true), { reopen: [4], toFold: [0, 9] });
 });
 
-test('expandSearchMacroNames derives Machine_* and follows RHS', () => {
-  installVscodeStub();
-  const { expandSearchMacroNames } = require('../src/macro_impact');
-  const derived = expandSearchMacroNames(['MACHINE_VALUE'], '');
-  assert.ok(derived.indexOf('MACHINE_VALUE') >= 0);
-  assert.ok(derived.indexOf('Machine_DJ') >= 0);
-  assert.ok(derived.indexOf('Machine_LS') >= 0);
-  assert.ok(derived.indexOf('Machine_HX_NOT_MULTI') >= 0);
-  assert.strictEqual(derived.length, 10);
+test('macro table keeps failed #if off both arms and records the define line', () => {
+  const { parseFullMacroTable, parseClangdCompileDefines } = require('../src/macros');
+  const bad = parseFullMacroTable("#if FLAGS == 'x'\n#define FOO 1\n#elif 1\n#define FOO 2\n#else\n#define FOO 3\n#endif\n");
+  assert.ok(!('FOO' in bad.macros));
+  const taken = parseFullMacroTable('#if 0\n#define FOO 1\n#else\n#define FOO 2\n#endif\n');
+  assert.strictEqual(taken.macros.FOO, '2');
+  const deadSide = parseFullMacroTable("#if 0 && (FLAGS == 'x')\n#define FOO 1\n#else\n#define FOO 2\n#endif\n");
+  assert.strictEqual(deadSide.macros.FOO, '2');
+  const loc = parseFullMacroTable('#define FOO \\\n1\n');
+  assert.strictEqual(loc.locs.FOO, 1);
+  assert.strictEqual(loc.macros.FOO, '1');
+  assert.deepStrictEqual(parseClangdCompileDefines([
+    'CompileFlags:',
+    '  Add:',
+    '    - -DFOO=1 # keep name only',
+    '    - "-DBAR=2" # quoted',
+    '    - -UFOO',
+    '  Remove:',
+    '    - -DNO'
+  ].join('\n')), { BAR: '2' });
+});
 
-  const yt = [
-    '#define FOO 1',
-    '#define BAR FOO',
-    '#define BAZ BAR',
-    '#define QUUX 3'
-  ].join('\n');
-  assert.deepStrictEqual(expandSearchMacroNames(['FOO'], yt), ['BAR', 'BAZ', 'FOO']);
+test('clear clangd index leaves the preamble', () => {
+  installVscodeStub();
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { wipeClangdIndex } = require('../src/macro_impact');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-idx-'));
+  const indexDir = path.join(root, '.cache', 'clangd', 'index');
+  const preamble = path.join(root, '.cache', 'clangd', 'preamble', 'keep');
+  try {
+    fs.mkdirSync(indexDir, { recursive: true });
+    fs.mkdirSync(path.dirname(preamble), { recursive: true });
+    fs.writeFileSync(path.join(indexDir, 'a.c.ABCD.idx'), 'x');
+    fs.writeFileSync(path.join(indexDir, 'b.h.10.idx'), 'y');
+    fs.writeFileSync(preamble, 'z');
+    const wiped = wipeClangdIndex(root);
+    assert.strictEqual(wiped.removed, 2);
+    assert.strictEqual(wiped.wiped, true);
+    assert.strictEqual(fs.existsSync(indexDir), false);
+    assert.strictEqual(fs.readFileSync(preamble, 'utf8'), 'z');
+    const blocked = path.join(root, '.cache', 'clangd', 'index');
+    fs.writeFileSync(blocked, 'not-a-directory');
+    const held = wipeClangdIndex(root);
+    assert.strictEqual(held.wiped, false);
+    assert.strictEqual(fs.existsSync(blocked), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function writeUvproj(root, name) {
@@ -495,22 +519,43 @@ test('keil layout defaults to f429 when both projects exist', () => {
   }
 });
 
-test('compile_commands stamp stale detection', () => {
+test('compile_commands stamp follows the branch, not the commit', () => {
   const os = require('os');
   const path = require('path');
   const fs = require('fs');
   const {
-    isCompileCommandsStale, writeCompileCommandsStamp
+    isCompileCommandsBranchStale, writeCompileCommandsStamp
   } = require('../src/cc_stamp');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-cc-'));
-  assert.ok(isCompileCommandsStale(dir, 'abc'));
-  fs.writeFileSync(path.join(dir, 'compile_commands.json'), '[]\n', 'utf8');
-  assert.ok(isCompileCommandsStale(dir, 'abc'));
-  writeCompileCommandsStamp(dir, 'abc');
-  const stamp = JSON.parse(fs.readFileSync(path.join(dir, '.zkz', 'run', 'compile-commands-stamp.json'), 'utf8'));
-  assert.ok(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4}$/.test(stamp.at));
-  assert.ok(!isCompileCommandsStale(dir, 'abc'));
-  assert.ok(isCompileCommandsStale(dir, 'def'));
+  const git = path.join(dir, '.git');
+  const main = path.join(git, 'refs', 'heads', 'main');
+  const oid = '0123456789abcdef0123456789abcdef01234567';
+  const next = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  try {
+    assert.ok(isCompileCommandsBranchStale(dir));
+    fs.mkdirSync(path.dirname(main), { recursive: true });
+    fs.writeFileSync(main, oid + '\n', 'utf8');
+    fs.writeFileSync(path.join(git, 'HEAD'), 'ref: refs/heads/main\n', 'utf8');
+    fs.writeFileSync(path.join(dir, 'compile_commands.json'), '[]\n', 'utf8');
+    assert.ok(isCompileCommandsBranchStale(dir));
+    writeCompileCommandsStamp(dir);
+    const stamp = JSON.parse(fs.readFileSync(path.join(dir, '.zkz', 'run', 'compile-commands-stamp.json'), 'utf8'));
+    assert.strictEqual(stamp.branch, 'refs/heads/main');
+    assert.ok(!Object.prototype.hasOwnProperty.call(stamp, 'head'));
+    assert.ok(!isCompileCommandsBranchStale(dir));
+    fs.writeFileSync(main, next + '\n', 'utf8');
+    assert.ok(!isCompileCommandsBranchStale(dir));
+    fs.writeFileSync(path.join(git, 'HEAD'), 'ref: refs/heads/other\n', 'utf8');
+    assert.ok(isCompileCommandsBranchStale(dir));
+    fs.writeFileSync(path.join(dir, '.zkz', 'run', 'compile-commands-stamp.json'), JSON.stringify({
+      version: 1,
+      head: oid
+    }) + '\n', 'utf8');
+    fs.writeFileSync(path.join(git, 'HEAD'), 'ref: refs/heads/main\n', 'utf8');
+    assert.ok(isCompileCommandsBranchStale(dir));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 if (failed) {

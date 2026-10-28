@@ -118,7 +118,7 @@ function findSvd(root, flavor) {
 function findGdb(root) {
   const direct = firstExisting([cfg.get(root, 'gdbPath', '')]);
   if (direct) return slash(direct);
-  throw new Error('arm-none-eabi-gdb.exe not found. Set .zkz/settings.json keil.gdbPath.');
+  throw new Error('找不到 arm-none-eabi-gdb.exe，请在 .zkz/settings.json 设置 keil.gdbPath。');
 }
 
 function baseConfig(root, flavor) {
@@ -127,7 +127,6 @@ function baseConfig(root, flavor) {
     flavor === 'h750' ? 'h750.device' : 'f429.device',
     flavor === 'h750' ? 'STM32H750IB' : 'STM32F429BI'
   ));
-  const speed = String(cfg.getNumber(root, 'debugSpeedKHz', 4000));
   const gdbPath = findGdb(root);
   const svdFile = findSvd(root, flavor);
   const config = {
@@ -141,10 +140,9 @@ function baseConfig(root, flavor) {
     serverpath: '${command:zkz-keil.jlinkGdbServerPath}',
     gdbPath: '${command:zkz-keil.gdbPath}',
     debuggerArgs: ['-x', '${workspaceFolder}/.zkz/gdb_source_map.gdb'],
-    postStartSessionCommands: ['source .zkz/gdb_source_map.gdb'],
     showDevDebugOutput: 'raw',
     rtos: 'FreeRTOS',
-    serverArgs: ['-speed', speed],
+    serverArgs: ['-speed', '${command:zkz-keil.debugSpeed}'],
     overrideAttachCommands: ['monitor flash breakpoints = 1']
   };
   config.svdFile = '${command:zkz-keil.svdFile}';

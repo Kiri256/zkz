@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const { clean } = require('./filter_core');
 const { loadTable } = require('./enc_table');
 const {
-  slashRel, keilNativeRoot, keilStampPath, ensureZkz, isSourceExt,
+  slashRel, keilNativeRoot, keilStampPath, isSourceExt,
   DEFAULT_SKIP_DIR, libTops, libTopNames, createLibMatcher, isReparse, atomicWriteJson
 } = require('./paths');
 const { currentHead, currentBranch, gitText, git } = require('./git_exec');
@@ -69,18 +69,6 @@ function listTopDirs(repoRoot, libraryTops) {
   }
   if (!out.length) return BUSINESS_FALLBACK.filter((n) => fs.existsSync(path.join(repoRoot, n)));
   return out;
-}
-
-function walkFiles(root, relDir, acc) {
-  const abs = path.join(root, relDir);
-  let ents = [];
-  try { ents = fs.readdirSync(abs, { withFileTypes: true }); } catch (_) { return; }
-  for (const ent of ents) {
-    if (skipDirName(ent.name)) continue;
-    const rel = relDir ? relDir + '/' + ent.name : ent.name;
-    if (ent.isDirectory()) walkFiles(root, rel, acc);
-    else if (ent.isFile()) acc.push(slashRel(rel));
-  }
 }
 
 function walkProjectFiles(srcRoot, relDir, acc) {
@@ -166,7 +154,8 @@ function sourceSnapshot(repoRoot, stamp, isLibraryPath, topDirs) {
     } else {
       const top = rel.split('/')[0];
       const wasCopied = Object.prototype.hasOwnProperty.call(stamp.files || {}, rel);
-      if (!(wasCopied || tops.has(top) || rel.startsWith('Project/') || rel.startsWith('H750/Projects/MDK-ARM/'))) continue;
+      const atRootSource = rel.indexOf('/') < 0 && isSourceExt(rel);
+      if (!(wasCopied || tops.has(top) || atRootSource || rel.startsWith('Project/') || rel.startsWith('H750/Projects/MDK-ARM/'))) continue;
       if (skipSyncPath(rel)) continue;
     }
     const previous = library ? stamp.libraryFiles : stamp.files;
@@ -257,28 +246,6 @@ function syncOne(repoRoot, kn, table, stamp, nextStamp, rel, full, dirty, isLibr
   writeSourceOrCopy(repoRoot, kn, table, rel, isLibraryPath);
   nextStamp.targets[rel] = fileStamp(dst);
   return 'written';
-}
-
-function readKeilSetting(repoRoot) {
-  const { get } = require('../../shared/zkz_settings');
-  return function (key, fallback) {
-    return get(repoRoot, 'keil', key, fallback);
-  };
-}
-
-function copyDebugAxf(repoRoot, emit) {
-  const { resolveKeilLayout, layoutOptionsFromGet } = require('../../shared/keil_layout');
-  const layout = resolveKeilLayout(repoRoot, layoutOptionsFromGet(readKeilSetting(repoRoot)));
-  const src = path.join(repoRoot, layout.relAxf);
-  if (!fs.existsSync(src)) throw new Error('Missing output.axf, build first');
-  const dst = path.join(repoRoot, '.zkz', 'output.axf');
-  ensureZkz(repoRoot);
-  if (fs.existsSync(dst)) {
-    try { if (fs.lstatSync(dst).isSymbolicLink()) fs.unlinkSync(dst); } catch (_) { /* ignore */ }
-  }
-  copyFile(src, dst);
-  if (emit) emit('debug axf -> .zkz/output.axf');
-  return dst;
 }
 
 function collectProjectRels(repoRoot) {
@@ -425,12 +392,9 @@ function syncKeilTree(repoRoot, emit) {
       tally(syncOne(repoRoot, kn, table, stamp, nextStamp, rel, false, dirty, isLibraryPath));
     }
   } else {
-    for (const top of topDirs) {
-      const files = [];
-      walkFiles(repoRoot, top, files);
-      for (const rel of files) tally(syncOne(repoRoot, kn, table, stamp, nextStamp, rel, full, dirty, isLibraryPath));
-    }
-    for (const rel of collectProjectRels(repoRoot)) {
+    const rels = new Set(Object.keys(snapshot.files));
+    collectProjectRels(repoRoot).forEach((rel) => rels.add(rel));
+    for (const rel of rels) {
       tally(syncOne(repoRoot, kn, table, stamp, nextStamp, rel, full, dirty, isLibraryPath));
     }
   }
@@ -511,7 +475,6 @@ function syncKeilTree(repoRoot, emit) {
 
 module.exports = {
   syncKeilTree,
-  copyDebugAxf,
   keilNativeRoot,
   ensureRealParent,
   pruneMissing,

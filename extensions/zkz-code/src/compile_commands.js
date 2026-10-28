@@ -2,14 +2,11 @@
 
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 const { XMLParser, XMLValidator } = require('fast-xml-parser');
-const { writeCompileCommandsStamp, gitHead } = require('./cc_stamp');
+const { writeCompileCommandsStamp } = require('./cc_stamp');
 const { resolveKeilLayout: resolveShared, layoutOptionsFromGet } = require('../../shared/keil_layout');
 const { get } = require('../../shared/zkz_settings');
 const { record: recordPerf } = require('../../shared/perf');
-
-let compileCache = null;
 
 function readKeilSetting(root) {
   return function (key, fallback) {
@@ -60,15 +57,52 @@ function pickTarget(targets, name) {
   throw err;
 }
 
-function compilerFlags(targetXml) {
-  const opt = targetXml.TargetOption || {};
-  const cads = (opt.TargetArmAds || opt).Cads || {};
-  const vc = cads.VariousControls || {};
+function flagsFromControls(vc) {
   return {
     defines: splitList(tagText(vc, 'Define'), ','),
     undefines: splitList(tagText(vc, 'Undefine'), ','),
     includes: splitList(tagText(vc, 'IncludePath'), ';')
   };
+}
+
+function variousControls(node) {
+  if (!node) return {};
+  const cads = (node.FileArmAds || node.TargetArmAds || node).Cads || {};
+  return cads.VariousControls || {};
+}
+
+/** 目标级宏、取消定义和头文件路径。 */
+function compilerFlags(targetXml) {
+  const opt = targetXml.TargetOption || {};
+  return flagsFromControls(variousControls(opt));
+}
+
+/** 文件自己的宏和头文件路径。追加在目标级后面，空字段不产生参数。 */
+function fileLevelFlags(fileXml) {
+  const opt = fileXml && fileXml.FileOption;
+  if (!opt) return { defines: [], undefines: [], includes: [] };
+  return flagsFromControls(variousControls(opt));
+}
+
+/** 这一层的源文件，加上子组里的源文件。 */
+function filesInGroup(group) {
+  const files = list(group && group.Files && group.Files.File);
+  const nested = list(group && group.Groups && group.Groups.Group);
+  for (let i = 0; i < nested.length; i++) {
+    const inner = filesInGroup(nested[i]);
+    for (let j = 0; j < inner.length; j++) files.push(inner[j]);
+  }
+  return files;
+}
+
+function appendFlags(args, mdk, flags) {
+  for (let i = 0; i < flags.includes.length; i++) {
+    const abs = absFromMdk(mdk, flags.includes[i]);
+    if (abs) args.push('-I' + abs);
+  }
+  for (let i = 0; i < flags.undefines.length; i++) args.push('-U' + flags.undefines[i]);
+  for (let i = 0; i < flags.defines.length; i++) args.push('-D' + flags.defines[i]);
+  return args;
 }
 
 function isCSource(rel) {
@@ -85,17 +119,15 @@ function buildCompileCommands(xml, mdk, targetName) {
   const project = new XMLParser({ parseTagValue: false, processEntities: true, htmlEntities: true }).parse(xml).Project || {};
   const target = pickTarget(list(project.Targets && project.Targets.Target), targetName);
   const flags = compilerFlags(target);
-  const args = ['clang'];
-  for (let i = 0; i < flags.includes.length; i++) {
-    const abs = absFromMdk(mdk, flags.includes[i]);
-    if (abs) args.push('-I' + abs);
-  }
-  for (let i = 0; i < flags.undefines.length; i++) args.push('-U' + flags.undefines[i]);
-  for (let i = 0; i < flags.defines.length; i++) args.push('-D' + flags.defines[i]);
+  const baseArgs = appendFlags(['clang'], mdk, flags);
   const dir = normPath(mdk);
   const entries = [];
-  const files = list(target.Groups && target.Groups.Group)
-    .flatMap((group) => list(group.Files && group.Files.File));
+  const groups = list(target.Groups && target.Groups.Group);
+  const files = [];
+  for (let g = 0; g < groups.length; g++) {
+    const inner = filesInGroup(groups[g]);
+    for (let j = 0; j < inner.length; j++) files.push(inner[j]);
+  }
   for (let i = 0; i < files.length; i++) {
     const fileXml = files[i];
     const type = tagText(fileXml, 'FileType');
@@ -107,7 +139,7 @@ function buildCompileCommands(xml, mdk, targetName) {
     const file = absFromMdk(mdk, rel);
     if (!file) continue;
     entries.push({
-      arguments: args.slice(),
+      arguments: appendFlags(baseArgs.slice(), mdk, fileLevelFlags(fileXml)),
       directory: dir,
       file: file
     });
@@ -147,44 +179,20 @@ async function generateOnRoot(root, log) {
   const targetName = (layout && layout.defaultTarget) || '';
   if (log) log('generate compile_commands flavor=' + (layout.flavor || '') + ' uvproj=' + path.basename(proj) + ' target=' + targetName);
   const xml = fs.readFileSync(proj, 'utf8').replace(/^\uFEFF/, '');
-  const cacheKey = crypto.createHash('sha1').update('v3\0' + path.resolve(mdk)).update('\0' + xml).update('\0' + (layout.flavor || '')).update('\0' + targetName).digest('hex');
-  const cacheFile = path.join(root, '.zkz', 'run', 'compile-commands-cache.json');
-  let cached = compileCache && compileCache.key === cacheKey ? compileCache : null;
-  const memoryHit = !!cached;
-  if (!cached) {
-    try {
-      const obj = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-      if (obj && obj.key === cacheKey && typeof obj.text === 'string') {
-        const entries = JSON.parse(obj.text);
-        if (Array.isArray(entries) && entries.length && entries.every((e) => e && typeof e.file === 'string' && typeof e.directory === 'string' && Array.isArray(e.arguments))) {
-          cached = { key: cacheKey, text: obj.text, entries, target: obj.target || targetName };
-        }
-      }
-    } catch (_) { /* invalid or missing cache is rebuilt */ }
-  }
-  const built = cached || buildCompileCommands(xml, mdk, targetName);
+  const built = buildCompileCommands(xml, mdk, targetName);
   if (!built.entries.length) throw new Error('目标 ' + built.target + ' 里没有 C 源文件');
-  const text = cached ? cached.text : JSON.stringify(built.entries, null, 4) + '\n';
-  compileCache = { key: cacheKey, text, entries: built.entries, target: built.target };
-  try {
-    if (!cached) {
-      fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
-      fs.writeFileSync(cacheFile, JSON.stringify({ key: cacheKey, text: text, target: built.target }, null, 2) + '\n', 'utf8');
-    }
-  } catch (_) { /* cache is an optimization, output generation must continue */ }
+  const text = JSON.stringify(built.entries, null, 4) + '\n';
   const src = path.join(mdk, 'compile_commands.json');
   const dst = path.join(root, 'compile_commands.json');
   writeIfChanged(src, text);
   if (path.resolve(src) !== path.resolve(dst)) writeIfChanged(dst, text);
-  try { writeCompileCommandsStamp(root, gitHead(root)); } catch (_) { /* ignore */ }
+  try { writeCompileCommandsStamp(root); } catch (_) { /* ignore */ }
   if (log) log('compile_commands.json ready: ' + dst + ' (' + built.entries.length + ')');
   recordPerf(root, 'zkz-code.generateCompileCommands', {
     ms: Number(process.hrtime.bigint() - perfStart) / 1e6,
     entries: built.entries.length,
     flavor: layout.flavor || '',
-    target: targetName,
-    cacheHit: !!cached,
-    memoryHit
+    target: targetName
   });
   return 'generated';
 }

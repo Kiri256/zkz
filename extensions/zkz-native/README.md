@@ -24,27 +24,23 @@
 | 命令 | 说明 |
 | --- | --- |
 | `zkz-native.enable` | 建表、装本地 filter/hook、把非库源码 smudge 成 UTF-8，并只对这些文件做往返自检 |
-| `zkz-native.disable` | 卸 filter，按仓库原编码重新检出 |
-| `zkz-native.refreshTable` | 按 HEAD 刷新编码表；重命名/新增后应刷 |
-| `zkz-native.checkRoundtrip` | 检查当前 GBK 文件能否无损编回 cp936 |
-| `zkz-native.status` | 状态摘要（状态栏点击弹出命令列表） |
+| `zkz-native.disable` | 卸 filter，按编码表把工作区编回原编码；未提交的修改保留 |
+| `zkz-native.refreshTable` | 按 HEAD 重建编码表 |
 | `zkz-native.syncKeilTree` | 把工作区 clean 到 `.zkz/keil-native/` |
-| `zkz-native.copyDebugAxf` | 把调试 axf 拷到 `.zkz/output.axf` |
-| `zkz-native.saveConfigOverlay` | 把 `.zkz/settings.json` 里 `native.paths` 列出的本机配置存成权威副本（切分支后提示是否还原） |
+| `zkz-native.saveConfigOverlay` | 把 `.zkz/settings.json` 里 `native.paths` 列出的本机配置存成权威副本。切分支后，只在副本和工作区不一致时询问是否还原 |
 | `zkz-native.restoreConfigOverlay` | 立刻从权威副本还原上述全部路径；目录保留，只删其中除 `.gitkeep` / `gitkeep` 以外的文件 |
-| `zkz-native.warmTextconv` | 用一次进程把当前 `.c/.h` 的全部历史版本写入 `refs/notes/textconv/zkznative`。冷缓存时整文件 blame 会为每个历史 blob 另起 node；预热后不再这样做。不要删除这份缓存 |
 
-`.zkz/settings.json` 的 `native.paths` 只给手动的 overlay 保存/还原用。旧的 `.zkz/config_paths.json` 会在读取时并进这份名单后删除；其中的 `skipWorktree` / `overlay` / `forbidStage` 也会合并进来。这些文件按普通 Git 路径显示在更改里，不再 skip-worktree，也不禁止暂存。`.zkz/` 内部文件不进 overlay。
+`.zkz/settings.json` 的 `native.paths` 只给手动的 overlay 保存/还原用。旧的 `.zkz/config_paths.json` 会在读取时并进这份名单后删除；其中的 `skipWorktree` / `overlay` / `forbidStage` 也会合并进来。这些文件按普通 Git 路径显示在更改里，不再 skip-worktree。提交不拦截本机文件。`.zkz/` 内部文件不进 overlay。
 
-`zkz-native.isEnabled` / `zkz-native.resolveRoot` 仍可调用，不出现在命令面板。`zkz-code` 和 `zkz-keil` 不走这两个命令。
+状态栏只显示 `native 开` 或 `native 关`。悬停是编码表和失败记录。调试 axf 由 `zkz-keil` 准备调试时从真源产物拷到 `.zkz/output.axf`。`git diff` / `git blame` 仍走 `textconv`，Git 自己把结果写入 `refs/notes/textconv/zkznative`。
 
 启用要求工作区干净。本地配置写在 `.git/info/attributes` 和 `.git/config`，不进仓库。filter 为 `required=true`：起不来时 git 会失败，这是为了避免把错误编码写进仓库。
 
-git hook 只保留 `pre-commit` / `pre-push`（挡坏提交/推送）。过滤器启用时，监视 `.git/HEAD` 的分支指向：换分支才弹出通知并刷新编码表，同时询问是否从权威副本还原本地配置。同分支上的提交和撤回不触发。过滤器关闭后不再监视分支、不刷表、不提示还原，其它命令也不会执行，直到再次 Enable。不再走 `post-checkout` 等 hook。失败另有警告。
+git hook 只保留 `pre-commit` / `pre-push`（挡坏提交/推送）。过滤器启用时，监视 `.git/HEAD` 的分支指向：换分支显示一条进度并刷新编码表，刷新失败才警告。本地配置只在权威副本和工作区不一致时询问是否还原；没有副本不询问，需要时用菜单「保存本地配置」。同分支上的提交和撤回不触发。过滤器关闭后不再监视分支、不刷表、不提示还原。不再走 `post-checkout` 等 hook。
 
 过滤器异常时运行 **zkz-native.disable** 即可卸掉（只改 `.git/config` 与 attributes，不依赖 filter 进程）。
 
-历史 GBK 里解不出的字节用私用区字符（U+E000 起，低 8 位是原字节）带到工作区，clean 时写回原字节，因此不会让 `git status` 一直脏，也不记往返失败。工作区里已经出现的 U+FFFD 仍直接丢掉，并记在 `.zkz/run/roundtrip-failures.json` 的 `drops` 里（文件、clean 或 smudge、个数和位置），不写入 `files`，不拦提交。同一方向下一次过滤不再删字符时清掉对应记录。状态栏标出仍存在的文件。表情等 cp936 没有的字符仍记入同一文件的 `files`，并在状态栏标出。`pre-commit` / `pre-push` 会拦编码不对的 blob。握手被拒时写 `.zkz/run/handshake-reject.json`（含首包 hex）。
+历史 GBK 里解不出的字节用私用区字符（U+E000 起，低 8 位是原字节）带到工作区，clean 时写回原字节，因此不会让 `git status` 一直脏，也不记往返失败。工作区里已经出现的 U+FFFD 仍直接丢掉，并记在 `.zkz/run/roundtrip-failures.json` 的 `drops` 里（文件、clean 或 smudge、个数和位置），不写入 `files`，不拦提交。同一方向下一次过滤不再删字符时清掉对应记录。这些文件还在、或提交被拒绝时，悬停列出路径。表情等 cp936 没有的字符仍记入同一文件的 `files`。`pre-commit` / `pre-push` 会拦编码不对的 blob，并把最近一次拒绝写到 `.zkz/run/commit-reject.json`，状态栏可据此重新暂存或打开文件。握手被拒时写 `.zkz/run/handshake-reject.json`（含首包 hex）。
 
 `ZKZ_NATIVE_LOG=1` 时写 `.zkz/run/zkz-native.log`。
 
@@ -90,5 +86,5 @@ stamp 的失效条件包括算法版本、HEAD、分支、编码映射内容和�
 - 换机器 / CI 没装本地 filter 时，检出的是原始 GBK，通常无所谓。
 - 非 `.c/.h`（如 `.uvproj`）保持原字节，工具可能乱码。
 - VS Code 内置内联 diff 左侧对 GBK blob 仍可能乱码；CLI `git diff` 有 textconv。
-- 重命名 GBK 文件后必须先刷新编码表，否则会按新文件写成 UTF-8。
-- 库目录不过滤，编码没有 clean 兜底；编烧树里仍是 junction。改过的库 `.c/.h` 会在同步编烧树、提交和推送时巡检：HEAD 为 GBK 而当前变成 UTF-8，或出现 U+FFFD，会写入 `.zkz/run/lib-encoding-warnings.json` 并告警，不改文件、不拦编译。要提交时拦住，设 `git config --local zkz.libEncodingStrict true`。
+- 表里没有的已跟踪文件按索引 blob 登记，不按工作区 UTF-8 登记。GBK 文件改名后若暂存成了 UTF-8，提交会被拒绝，编码表改回 GBK，需要重新 `git add`。原先登记为 ASCII 的文件一旦写入中文，能进 cp936 的会改记为 GBK 再提交。
+- 库目录不过滤，编码没有 clean 兜底；编烧树里仍是 junction。改过的库 `.c/.h` 会在同步编烧树、提交和推送时巡检：HEAD 为 GBK 而当前变成 UTF-8，或出现 U+FFFD，会写入 `.zkz/run/lib-encoding-warnings.json` 并告警，不改文件、不拦编译、不拦提交。

@@ -14,7 +14,6 @@ function main() {
   }
   const buf = fs.readFileSync(file);
   const repoRoot = findRepoRoot(process.env.GIT_WORK_TREE || process.cwd());
-  const table = loadTable(repoRoot);
   let rel = '';
   try {
     const abs = path.resolve(file);
@@ -24,7 +23,13 @@ function main() {
       rel = slashRel(path.relative(root, abs));
     }
   } catch (_) { /* temp blob outside the worktree */ }
-  process.stdout.write(smudge(rel || file, buf, table, repoRoot));
+  // Git 给历史 blob 的是临时文件，没有仓库路径。此时按字节判断，不用临时路径去查表。
+  if (!rel) {
+    process.stdout.write(smudge('', buf, null, ''));
+    return;
+  }
+  const table = loadTable(repoRoot);
+  process.stdout.write(smudge(rel, buf, table, repoRoot));
 }
 
 main();

@@ -2,7 +2,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
 
 function isOid(s) {
   return /^[0-9a-f]{40}$/i.test(s);
@@ -24,22 +23,6 @@ function gitDirOf(repoRoot) {
   }
 }
 
-function readPackedOid(gitDir, ref) {
-  let text = '';
-  try { text = fs.readFileSync(path.join(gitDir, 'packed-refs'), 'utf8'); } catch (_) { return ''; }
-  const lines = text.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line || line.charAt(0) === '#' || line.charAt(0) === '^') continue;
-    const sp = line.indexOf(' ');
-    if (sp < 0) continue;
-    const oid = line.slice(0, sp).trim();
-    const name = line.slice(sp + 1).trim();
-    if (name === ref && isOid(oid)) return oid.toLowerCase();
-  }
-  return '';
-}
-
 /** 当前分支。符号引用返回 refs/heads/...；分离 HEAD 返回 detached。同分支提交、撤回不变。 */
 function readHeadName(repoRoot) {
   const gitDir = gitDirOf(repoRoot);
@@ -50,38 +33,6 @@ function readHeadName(repoRoot) {
   const m = head.match(/^ref:\s*(.+)$/);
   if (!m) return '';
   return m[1].trim();
-}
-
-/** 读 .git/HEAD 得到当前 oid，不启动 git 进程。 */
-function readHeadOid(repoRoot) {
-  const gitDir = gitDirOf(repoRoot);
-  if (!gitDir) return '';
-  let head = '';
-  try { head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim(); } catch (_) { return ''; }
-  if (isOid(head)) return head.toLowerCase();
-  const m = head.match(/^ref:\s*(.+)$/);
-  if (!m) return '';
-  const ref = m[1].trim();
-  try {
-    const oid = fs.readFileSync(path.join(gitDir, ...ref.split('/')), 'utf8').trim();
-    if (isOid(oid)) return oid.toLowerCase();
-  } catch (_) { /* loose ref 不存在时查 packed-refs */ }
-  return readPackedOid(gitDir, ref);
-}
-
-function gitHead(root) {
-  if (!root) return '';
-  try {
-    const r = spawnSync('git', ['rev-parse', 'HEAD'], {
-      cwd: root,
-      encoding: 'utf8',
-      windowsHide: true
-    });
-    if (r.status !== 0) return '';
-    return String(r.stdout || '').trim();
-  } catch (_) {
-    return '';
-  }
 }
 
 function compileCommandsStampPath(root) {
@@ -104,45 +55,35 @@ function readCompileCommandsStamp(root) {
   }
 }
 
-function formatLocalNow(d) {
-  const x = d || new Date();
-  const pad = (n) => (n < 10 ? '0' : '') + n;
-  const offMin = -x.getTimezoneOffset();
-  const sign = offMin >= 0 ? '+' : '-';
-  const abs = Math.abs(offMin);
-  return x.getFullYear() + '-' + pad(x.getMonth() + 1) + '-' + pad(x.getDate())
-    + ' ' + pad(x.getHours()) + ':' + pad(x.getMinutes()) + ':' + pad(x.getSeconds())
-    + ' ' + sign + pad(Math.floor(abs / 60)) + pad(abs % 60);
-}
-
-function writeCompileCommandsStamp(root, head) {
+function writeCompileCommandsStamp(root) {
   if (!root) return;
   fs.mkdirSync(path.dirname(compileCommandsStampPath(root)), { recursive: true });
   fs.writeFileSync(compileCommandsStampPath(root), JSON.stringify({
     version: 1,
-    head: String(head || ''),
-    at: formatLocalNow()
+    branch: readHeadName(root)
   }, null, 2) + '\n', 'utf8');
 }
 
-function isCompileCommandsStale(root, head) {
+/**
+ * 编译数据库是否还停在别的分支。文件没有、标记没有分支名、标记分支和当前分支不同，都算。
+ * 当前分支读不到时，文件还在就不算。同分支提交不改变分支名，不算。
+ */
+function isCompileCommandsBranchStale(root) {
   if (!root) return false;
   const cc = path.join(root, 'compile_commands.json');
   if (!fs.existsSync(cc)) return true;
-  const h = head || gitHead(root);
-  if (!h) return false;
+  const name = readHeadName(root);
+  if (!name) return false;
   const stamp = readCompileCommandsStamp(root);
-  if (!stamp || !stamp.head) return true;
-  return stamp.head !== h;
+  if (!stamp || !stamp.branch) return true;
+  return stamp.branch !== name;
 }
 
 module.exports = {
-  gitHead,
   readHeadName,
-  readHeadOid,
   gitDirOf,
   compileCommandsStampPath,
   readCompileCommandsStamp,
   writeCompileCommandsStamp,
-  isCompileCommandsStale
+  isCompileCommandsBranchStale
 };

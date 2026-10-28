@@ -3,6 +3,7 @@
  * Fold inactive #if/#elif/#else branches using yt_version.h + .clangd -D/-U.
  * Fold only (not hide). Source .c/.cpp only; headers are skipped.
  * Conditions that mention macros absent from the scanned table are left open.
+ * 自动重折只动这次从活变死、或从死变活的行。点「刷新折叠」才把死分支重新折上。
  *
  * Important: editor.fold WITHOUT levels/direction uses setCollapseStateUp and may
  * fold the parent #if (whole-file wrapper). Always pass levels:1 + direction:down.
@@ -12,18 +13,15 @@ const path = require('path');
 const {
   loadMacroTable,
   invalidateMacroTable,
-  evalPpExpr,
   resolveMacroRoot
 } = require('./macros');
+const { evalPpExprResult } = require('./pp_expr');
 
 const LANGS = ['c', 'cpp', 'cuda-cpp'];
 const SRC_EXT_RE = /\.(c|cpp|cc|cxx)$/i;
 const HEADER_EXT_RE = /\.(h|hpp|hh|hxx)$/i;
 
-/** Skip auto-fold when branch covers this fraction of the file (file-wrapper #if). */
-const MAX_FILE_FRACTION = 0.45;
-
-/** @type {Map<string, { inactive: number[], active: number[], stamp: string }>} */
+/** @type {Map<string, { inactive: number[], stamp: string }>} */
 const gLastApplied = new Map();
 let gApplyTimer = null;
 let gPendingRetry = 0;
@@ -32,12 +30,12 @@ const MAX_PENDING_RETRY = 4;
 /** 等宏表就绪后再折一次。 */
 const FOLD_PENDING_RETRY_MS = 800;
 const FOLD_INIT_DELAY_MS = 600;
-let gFoldingProvider = null;
 /** @type {vscode.EventEmitter<void>|null} */
 let gFoldingChangeEmitter = null;
 let gFoldCount = 0;
 let gFoldListener = null;
 let gCommandPrefix = 'zkz-code';
+let gSettingsWatch = null;
 
 function command(name) {
   return gCommandPrefix + '.' + name;
@@ -86,11 +84,12 @@ function isKnownMacro(name, known) {
   return !!(name && known && known.has(name));
 }
 
-/** True when expr names a macro that was not scanned into env. */
+/** 表达式里有宏表没有的名字时为真。字符常量里的字母不算宏名。 */
 function ppExprHasUnknown(expr, known) {
   let e = String(expr || '');
   e = e.replace(/\/\*.*?\*\//g, ' ');
   e = e.replace(/\/\/.*$/, '').trim();
+  e = e.replace(/'(?:\\.|[^'\\])*'/g, ' ');
   if (!e) return false;
   const re = /[A-Za-z_]\w*/g;
   let m;
@@ -211,6 +210,13 @@ function collectPpBranches(text, macros) {
     });
   };
 
+  const condOf = (expr) => {
+    if (ppExprHasUnknown(expr, known)) return { unknown: true, value: false };
+    const r = evalPpExprResult(expr, env);
+    if (!r.ok) return { unknown: true, value: false };
+    return { unknown: false, value: !!r.value };
+  };
+
   const lines = String(text || '').split(/\r?\n/);
   let li = 0;
   while (li < lines.length) {
@@ -228,9 +234,8 @@ function collectPpBranches(text, macros) {
     const body = trim.replace(/^#\s*/, '');
 
     if (/^if\b/.test(body) && !/^ifdef\b/.test(body) && !/^ifndef\b/.test(body)) {
-      const expr = body.replace(/^if\b/, '').trim();
-      const unk = ppExprHasUnknown(expr, known);
-      pushCond(startLi, 'if', unk, !unk && evalPpExpr(expr, env));
+      const c = condOf(body.replace(/^if\b/, '').trim());
+      pushCond(startLi, 'if', c.unknown, c.value);
       li += 1;
       continue;
     }
@@ -254,18 +259,25 @@ function collectPpBranches(text, macros) {
         const top = stack[stack.length - 1];
         const p = framesState(stack.slice(0, -1));
         const expr = body.replace(/^elif\b/, '').trim();
-        if (p.dead || (top.seenTrue && !top.seenUnknown && !p.unknown)) {
+        const taken = top.seenTrue && !top.seenUnknown && !p.unknown;
+        if (p.dead || taken) {
           top.active = false;
           top.unknown = false;
-        } else if (p.unknown || top.seenUnknown || ppExprHasUnknown(expr, known)) {
-          top.active = false;
-          top.unknown = true;
-          top.seenUnknown = true;
         } else {
-          const val = evalPpExpr(expr, env);
-          top.active = val;
-          top.unknown = false;
-          if (val) top.seenTrue = true;
+          const c = condOf(expr);
+          // 已知为假的分支到不到都不会进，可以折。已知为真但前面还有未知，则不能折。
+          if (!c.unknown && !c.value) {
+            top.active = false;
+            top.unknown = false;
+          } else if (!c.unknown && c.value && !p.unknown && !top.seenUnknown) {
+            top.active = true;
+            top.unknown = false;
+            top.seenTrue = true;
+          } else {
+            top.active = false;
+            top.unknown = true;
+            top.seenUnknown = true;
+          }
         }
         top.dirLine = startLi;
         top.kind = 'elif';
@@ -301,18 +313,27 @@ function collectPpBranches(text, macros) {
       li += 1;
       continue;
     }
-    if (framesState(stack).live && /^define\s+[A-Za-z_]\w*(?:\s+|$)/.test(body) && !/^define\s+[A-Za-z_]\w*\(/.test(body)) {
-      const dm = body.match(/^define\s+([A-Za-z_]\w*)(?:\s+(.*))?$/);
-      if (dm) {
-        let val = (dm[2] || '').trim();
+    const st = framesState(stack);
+    const def = body.match(/^define\s+([A-Za-z_]\w*)(\()?/);
+    if (def && (st.live || st.unknown)) {
+      const name = def[1];
+      if (st.unknown) {
+        // 未知分支里的定义可能生效，后面不能再沿用表里的旧值
+        delete env[name];
+        known.delete(name);
+      } else if (!def[2]) {
+        let val = body.replace(/^define\s+[A-Za-z_]\w*/, '').trim();
         val = val.replace(/\/\*.*?\*\//g, ' ').replace(/\/\/.*$/, '').trim();
-        env[dm[1]] = val;
-        known.add(dm[1]);
+        env[name] = val;
+        known.add(name);
       }
     }
-    if (framesState(stack).live && /^undef\b/.test(body)) {
+    if ((st.live || st.unknown) && /^undef\b/.test(body)) {
       const name = body.replace(/^undef\b/, '').trim().split(/\s+/)[0];
-      if (name) {
+      if (name && st.unknown) {
+        delete env[name];
+        known.delete(name);
+      } else if (name) {
         delete env[name];
         known.add(name);
       }
@@ -326,60 +347,77 @@ function collectPpBranches(text, macros) {
   return out;
 }
 
-function isFileWrapperBranch(b, lineCount) {
-  if (!lineCount || lineCount < 1) return false;
-  const span = b.endLine - b.startLine + 1;
-  return span / lineCount >= MAX_FILE_FRACTION;
-}
-
 function passesFoldSize(b, minLines) {
   return b.endLine > b.startLine && (b.endLine - b.startLine + 1) >= minLines;
 }
 
-/** 已知未激活、且不是整文件包裹的分支。Provider 与命令式折叠共用这一判定。 */
-function isFoldableInactive(b, lineCount, minLines) {
+/** 已知未激活、且够长的分支。大段死代码也折。 */
+function isFoldableInactive(b, minLines) {
   if (!passesFoldSize(b, minLines)) return false;
   if (b.active || b.unknown) return false;
-  if (isFileWrapperBranch(b, lineCount)) return false;
   return true;
 }
 
-/** Only inactive, known, non-wrapper branches become fold targets. */
-function selectFoldTargets(branches, lineCount) {
+/** 当前文件里要折的死分支起始行。 */
+function selectFoldTargets(branches) {
   const minLines = cfgMinLines();
   const inactive = [];
-  const activeKeepOpen = [];
   for (const b of branches) {
-    if (!passesFoldSize(b, minLines)) continue;
-    if (isFoldableInactive(b, lineCount, minLines)) inactive.push(b.startLine);
-    else activeKeepOpen.push(b.startLine);
+    if (isFoldableInactive(b, minLines)) inactive.push(b.startLine);
   }
-  return { inactive, activeKeepOpen };
+  return { inactive };
 }
 
-function branchesToFoldingRanges(branches, lineCount) {
+/**
+ * 自动重折只动变化的行。force 时把当前死分支全部重新折上。
+ * 不再死的行展开。已经折过、用户又打开的行留着。
+ * @param {number[]|null|undefined} prevInactive
+ * @param {number[]} inactive
+ * @param {boolean} force
+ * @returns {{ reopen: number[], toFold: number[] }}
+ */
+function foldDelta(prevInactive, inactive, force) {
+  const now = new Set(inactive || []);
+  const reopen = [];
+  const prev = prevInactive || null;
+  if (prev) {
+    for (let i = 0; i < prev.length; i++) {
+      if (!now.has(prev[i])) reopen.push(prev[i]);
+    }
+  }
+  if (force || !prev) return { reopen: reopen, toFold: (inactive || []).slice() };
+  const was = new Set(prev);
+  const toFold = [];
+  const list = inactive || [];
+  for (let i = 0; i < list.length; i++) {
+    if (!was.has(list[i])) toFold.push(list[i]);
+  }
+  return { reopen: reopen, toFold: toFold };
+}
+
+function branchesToFoldingRanges(branches) {
   const minLines = cfgMinLines();
   /** @type {vscode.FoldingRange[]} */
   const ranges = [];
   for (const b of branches) {
-    if (!isFoldableInactive(b, lineCount, minLines)) continue;
+    if (!isFoldableInactive(b, minLines)) continue;
     ranges.push(new vscode.FoldingRange(b.startLine, b.endLine, vscode.FoldingRangeKind.Region));
   }
   return ranges;
 }
 
 function provideFoldingRanges(document) {
-  if (!cfgEnabled() || !isCppLikeDoc(document)) return [];
+  if (!cfgEnabled() || !isCppLikeDoc(document)) return null;
   const root = resolveWorkspaceRoot();
-  if (!root) return [];
+  if (!root) return null;
   try {
     const env = loadMacroEnv(root);
-    if (!env.ready) return [];
-    const lineCount = document.lineCount || 0;
+    if (!env.ready) return null;
     const branches = cachedBranches(document, env.macros, env.key);
-    return branchesToFoldingRanges(branches, lineCount);
+    const ranges = branchesToFoldingRanges(branches);
+    return ranges.length ? ranges : null;
   } catch (_) {
-    return [];
+    return null;
   }
 }
 
@@ -408,35 +446,72 @@ async function unfoldLines(lines) {
   });
 }
 
+/** 关掉折叠时要展开的行。优先用这次会话折过的行，否则按当前死分支算。 */
+function linesToReopen(editor) {
+  const key = editor.document.uri.toString();
+  const prev = gLastApplied.get(key);
+  gLastApplied.delete(key);
+  if (prev && prev.inactive && prev.inactive.length) return prev.inactive;
+  try {
+    const root = resolveWorkspaceRoot();
+    const env = root && loadMacroEnv(root);
+    if (!env || !env.ready) return [];
+    const branches = cachedBranches(editor.document, env.macros, env.key);
+    return selectFoldTargets(branches).inactive;
+  } catch (_) {
+    return [];
+  }
+}
+
 async function applyFoldsToEditor(editor, reason) {
-  if (!cfgEnabled() || !editor || !isCppLikeDoc(editor.document)) return false;
+  if (!cfgEnabled()) {
+    if (editor && editor === vscode.window.activeTextEditor) {
+      if (isCppLikeDoc(editor.document)) {
+        const lines = linesToReopen(editor);
+        if (lines.length) {
+          try { await unfoldLines(lines); } catch (_) { /* ignore */ }
+        }
+      }
+      updateStatusBar(0);
+    }
+    return true;
+  }
+  if (!editor || !isCppLikeDoc(editor.document)) {
+    if (editor && editor === vscode.window.activeTextEditor) updateStatusBar(0);
+    return false;
+  }
+  // editor.fold 只作用于当前编辑器。对其他可见编辑器下折会把别人的行号折进当前文件。
+  if (editor !== vscode.window.activeTextEditor) return true;
   const root = resolveWorkspaceRoot();
   if (!root) return false;
   const env = loadMacroEnv(root);
   if (!env.ready) return false;
 
   const doc = editor.document;
-  const lineCount = doc.lineCount || 0;
   const branches = cachedBranches(doc, env.macros, env.key);
-  const { inactive, activeKeepOpen } = selectFoldTargets(branches, lineCount);
+  const { inactive } = selectFoldTargets(branches);
 
   const key = doc.uri.toString();
-  const stamp = inactive.join(',') + '|' + activeKeepOpen.join(',');
   const prev = gLastApplied.get(key);
-  if (prev && prev.stamp === stamp && reason !== 'force' && reason !== 'retry') return true;
+  const stamp = inactive.join(',');
+  // 行号没变就不再下折，个数仍改成当前文件的。刷新折叠除外。
+  if (prev && prev.stamp === stamp && reason !== 'force') {
+    updateStatusBar(inactive.length);
+    return true;
+  }
 
-  // Ensure provider ranges refreshed before fold commands
   fireFoldingChanged();
   await new Promise((r) => setTimeout(r, reason === 'init' || reason === 'open' ? 120 : 40));
+  if (vscode.window.activeTextEditor !== editor) return true;
 
-  // Keep wrappers / active arms open first
-  if (activeKeepOpen.length) {
-    try { await unfoldLines(activeKeepOpen); } catch (_) { /* ignore */ }
+  const delta = foldDelta(prev && prev.inactive, inactive, reason === 'force');
+  if (delta.reopen.length) {
+    try { await unfoldLines(delta.reopen); } catch (_) { /* ignore */ }
   }
-  if (inactive.length) {
-    try { await foldLines(inactive); } catch (_) { /* ignore */ }
+  if (delta.toFold.length) {
+    try { await foldLines(delta.toFold); } catch (_) { /* ignore */ }
   }
-  gLastApplied.set(key, { inactive, active: activeKeepOpen, stamp });
+  gLastApplied.set(key, { inactive, stamp });
   updateStatusBar(inactive.length);
   return true;
 }
@@ -461,16 +536,16 @@ function scheduleApplyVisible(reason) {
   gApplyTimer = setTimeout(() => {
     gApplyTimer = null;
     void (async () => {
-      const eds = vscode.window.visibleTextEditors || [];
+      const ed = vscode.window.activeTextEditor;
       let anyPending = false;
-      for (const ed of eds) {
+      if (ed) {
         try {
           const ok = await applyFoldsToEditor(ed, reason);
           if (!ok && isCppLikeDoc(ed.document)) anyPending = true;
         } catch (_) { /* ignore */ }
       }
       // 启动时宏表可能还没就绪；只按失败次数重试，不再无条件晚折两遍
-      if (anyPending && (reason === 'init' || reason === 'retry' || reason === 'open')
+      if (anyPending && (reason === 'init' || reason === 'retry' || reason === 'open' || reason === 'macros')
         && gPendingRetry < MAX_PENDING_RETRY) {
         gPendingRetry += 1;
         setTimeout(() => scheduleApplyVisible('retry'), FOLD_PENDING_RETRY_MS);
@@ -483,7 +558,6 @@ function scheduleApplyVisible(reason) {
 
 function invalidateEnvCache() {
   invalidateMacroTable();
-  gLastApplied.clear();
   clearFoldCache();
   fireFoldingChanged();
 }
@@ -506,15 +580,14 @@ function activate(context, options) {
       return provideFoldingRanges(document);
     }
   };
-  gFoldingProvider = vscode.languages.registerFoldingRangeProvider(
+  context.subscriptions.push(vscode.languages.registerFoldingRangeProvider(
     [
       { language: 'c', pattern: '**/*.{c,C}' },
       { language: 'cpp', pattern: '**/*.{cpp,cc,cxx,CPP,CC,CXX}' },
       { language: 'cuda-cpp', pattern: '**/*.{c,cpp,cc,cxx}' }
     ],
     provider
-  );
-  context.subscriptions.push(gFoldingProvider);
+  ));
 
   const wrap = (fn) => async (...args) => {
     try { await fn(...args); }
@@ -524,35 +597,11 @@ function activate(context, options) {
   };
 
   context.subscriptions.push(
-    vscode.commands.registerCommand(command('foldInactiveIfdef'), wrap(async () => {
-      invalidateEnvCache();
-      const ed = vscode.window.activeTextEditor;
-      if (!ed) {
-        vscode.window.showWarningMessage('No active editor');
-        return;
-      }
-      const ok = await applyFoldsToEditor(ed, 'force');
-      if (!ok) {
-        vscode.window.showWarningMessage('zkz: yt_version macros not ready');
-        return;
-      }
-      const st = gLastApplied.get(ed.document.uri.toString());
-      const n = st && st.inactive ? st.inactive.length : 0;
-      vscode.window.setStatusBarMessage('zkz: folded inactive #if x' + n, 2500);
-    })),
-    vscode.commands.registerCommand(command('unfoldInactiveIfdef'), wrap(async () => {
-      const ed = vscode.window.activeTextEditor;
-      if (!ed) return;
-      const st = gLastApplied.get(ed.document.uri.toString());
-      const lines = st && st.inactive && st.inactive.length ? st.inactive : null;
-      if (lines && lines.length) await unfoldLines(lines);
-      else await vscode.commands.executeCommand('editor.unfoldAll');
-      gLastApplied.delete(ed.document.uri.toString());
-    })),
     vscode.commands.registerCommand(command('refreshIfdefFolds'), wrap(async () => {
       invalidateEnvCache();
       scheduleApplyVisible('force');
-    }))
+    })),
+    vscode.commands.registerCommand(command('toggleIfdefFolds'), wrap(toggleIfdefFold))
   );
 
   context.subscriptions.push(
@@ -576,12 +625,17 @@ function activate(context, options) {
   );
 
   watchSettingsFile(context);
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => watchSettingsFile(context)));
 
   // 会话恢复的已打开编辑器：宏表稍后才齐，失败走 anyPending 重试
   setTimeout(() => scheduleApplyVisible('init'), FOLD_INIT_DELAY_MS);
 }
 
 function watchSettingsFile(context) {
+  if (gSettingsWatch) {
+    gSettingsWatch.dispose();
+    gSettingsWatch = null;
+  }
   const root = repoRoot();
   if (!root) return;
   try { require('../../shared/zkz_settings').ensure(root); } catch (_) { /* ignore */ }
@@ -589,21 +643,33 @@ function watchSettingsFile(context) {
     new vscode.RelativePattern(path.join(root, '.zkz'), 'settings.json')
   );
   const onChange = () => {
-    invalidateEnvCache();
+    clearFoldCache();
+    fireFoldingChanged();
     updateStatusBar(0);
-    scheduleApplyVisible('force');
+    scheduleApplyVisible('settings');
   };
-  context.subscriptions.push(
+  gSettingsWatch = vscode.Disposable.from(
     watcher,
     watcher.onDidChange(onChange),
     watcher.onDidCreate(onChange),
     watcher.onDidDelete(onChange)
   );
+  context.subscriptions.push(gSettingsWatch);
+}
+
+function foldToggleLabel() {
+  return cfgEnabled() ? '关闭折叠' : '打开折叠';
+}
+
+/** 写入 code.ifdefFold.enabled。设置文件变化后由监视器重折或展开。 */
+async function toggleIfdefFold() {
+  const root = repoRoot();
+  if (!root) throw new Error('Open a workspace first');
+  require('../../shared/zkz_settings').set(root, 'code', 'ifdefFold.enabled', !cfgEnabled());
 }
 
 function onMacrosChanged() {
-  // 宏表已由 status 更新，这里只重折，避免清表再解析一遍
-  gLastApplied.clear();
+  // 宏表已由 status 更新。只折新死的行，只展开不再死的行。
   clearFoldCache();
   fireFoldingChanged();
   scheduleApplyVisible('macros');
@@ -616,7 +682,8 @@ module.exports = {
   loadMacroEnv,
   applyFoldsToEditor,
   selectFoldTargets,
+  foldDelta,
   foldBadge,
-  onFoldStatus,
-  MAX_FILE_FRACTION
+  foldToggleLabel,
+  onFoldStatus
 };

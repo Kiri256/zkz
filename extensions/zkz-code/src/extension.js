@@ -19,7 +19,6 @@ function activate(context) {
     } catch (e) {
       const msg = String(e && e.message ? e.message : e);
       void vscode.window.showErrorMessage(msg);
-      throw e;
     }
   }));
   const ensureSettings = () => {

@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync, spawn } = require('child_process');
+const { slashRel } = require('./paths');
 
 function gitArgs(args) {
   const a = args || [];
@@ -20,6 +21,7 @@ function git(repoRoot, args, opts) {
     encoding: o.encoding === 'buffer' ? undefined : (o.encoding || 'utf8'),
     maxBuffer: o.maxBuffer || 64 * 1024 * 1024,
     input: o.input,
+    timeout: o.timeout,
     env: process.env
   });
   if (r.error) throw r.error;
@@ -188,6 +190,88 @@ function readHeadOid(repoRoot) {
   return readPackedOid(gitDir, ref);
 }
 
+const gIndexCache = { root: '', mtime: 0, size: 0, map: null };
+
+/** 读索引里 stage 0 的 blob oid。不启动 git，避免在 clean 过滤器里再调 git 卡住 index.lock。 */
+function indexBlobOid(repoRoot, rel) {
+  const map = indexOidMap(repoRoot);
+  if (!map) return '';
+  return map.get(slashRel(rel)) || '';
+}
+
+function indexOidMap(repoRoot) {
+  const gitDir = gitDirOf(repoRoot);
+  if (!gitDir) return null;
+  const file = path.join(gitDir, 'index');
+  let st = null;
+  try { st = fs.statSync(file); } catch (_) { return null; }
+  if (gIndexCache.map && gIndexCache.root === repoRoot && gIndexCache.mtime === st.mtimeMs && gIndexCache.size === st.size) {
+    return gIndexCache.map;
+  }
+  let buf = null;
+  try { buf = fs.readFileSync(file); } catch (_) { return null; }
+  const map = parseIndexOids(buf);
+  if (!map) return null;
+  gIndexCache.root = repoRoot;
+  gIndexCache.mtime = st.mtimeMs;
+  gIndexCache.size = st.size;
+  gIndexCache.map = map;
+  return map;
+}
+
+function parseIndexOids(buf) {
+  if (!buf || buf.length < 12 || buf.slice(0, 4).toString('ascii') !== 'DIRC') return null;
+  const version = buf.readUInt32BE(4);
+  if (version !== 2 && version !== 3) return null;
+  const count = buf.readUInt32BE(8);
+  const map = new Map();
+  let offset = 12;
+  for (let n = 0; n < count; n++) {
+    if (offset + 62 > buf.length) return null;
+    const sha = buf.slice(offset + 40, offset + 60).toString('hex');
+    const flags = buf.readUInt16BE(offset + 60);
+    const stage = (flags >> 12) & 3;
+    let nameLen = flags & 0x0fff;
+    let nameStart = offset + 62;
+    if ((flags & 0x4000) !== 0) {
+      if (version < 3 || nameStart + 2 > buf.length) return null;
+      nameStart += 2;
+    }
+    let name = '';
+    if (nameLen === 0x0fff) {
+      const end = buf.indexOf(0, nameStart);
+      if (end < 0) return null;
+      name = buf.slice(nameStart, end).toString('utf8');
+      nameLen = end - nameStart;
+    } else {
+      if (nameStart + nameLen > buf.length) return null;
+      name = buf.slice(nameStart, nameStart + nameLen).toString('utf8');
+    }
+    let entryEnd = nameStart + nameLen + 1;
+    const span = entryEnd - offset;
+    const pad = (8 - (span % 8)) % 8;
+    entryEnd += pad;
+    if (entryEnd > buf.length) return null;
+    if (stage === 0 && name) map.set(slashRel(name), sha);
+    offset = entryEnd;
+  }
+  return map;
+}
+
+function tryCatFileBatch(repoRoot, specs) {
+  if (!specs || !specs.length) return [];
+  const r = git(repoRoot, ['cat-file', '--batch'], {
+    input: specs.join('\n') + '\n',
+    encoding: 'buffer',
+    allowFail: true,
+    timeout: 15000
+  });
+  if (r.status !== 0 || !r.stdout) return null;
+  const parsed = parseBatch(r.stdout, specs.length);
+  while (parsed.length < specs.length) parsed.push({ missing: true, data: Buffer.alloc(0) });
+  return parsed;
+}
+
 function catFileBatchSync(repoRoot, specs) {
   if (!specs || !specs.length) return [];
   const r = git(repoRoot, ['cat-file', '--batch'], {
@@ -219,5 +303,7 @@ module.exports = {
   gitDirOf,
   listSourceFiles,
   catFileBatch,
-  catFileBatchSync
+  catFileBatchSync,
+  tryCatFileBatch,
+  indexBlobOid
 };

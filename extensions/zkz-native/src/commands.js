@@ -1,18 +1,14 @@
 'use strict';
 
 const vscode = require('vscode');
-const path = require('path');
 const { findProjectRoot } = require('../../shared/project_root');
 const { isInstalled } = require('./git_config');
-const { enable, disable, refresh, statusSnapshot } = require('./bootstrap');
-const { loadTable } = require('./enc_table');
-const { roundtripOk, parseMapped } = require('./encoding');
-const { slashRel } = require('./paths');
-const { syncKeilTree, copyDebugAxf } = require('./keil_tree');
+const { enable, disable, refresh, statusSnapshot, statusLines } = require('./bootstrap');
+const { git } = require('./git_exec');
+const { syncKeilTree } = require('./keil_tree');
 const { seedOverlay, restoreOverlay } = require('./overlay');
 const { withLock } = require('./lock');
-const { FILTER_FAIL_LIMIT } = require('./observe');
-const { warmFile } = require('./textconv_cache');
+const { dismissCommitReject } = require('./observe');
 
 function output() {
   if (!output._ch) output._ch = vscode.window.createOutputChannel('zkz Native');
@@ -21,6 +17,28 @@ function output() {
 
 function emit(msg) {
   output().appendLine(String(msg == null ? '' : msg));
+}
+
+let onStatusFn = null;
+let onFlash = null;
+
+// 结果写到输出。flash 是状态栏上停留几秒的短句。
+function note(msg, flash) {
+  emit(msg);
+  if (flash && onFlash) onFlash(flash);
+}
+
+function restage(rels) {
+  const repo = requireInstalled();
+  const list = (rels || []).filter(Boolean);
+  if (!list.length) return null;
+  return withLock(repo, () => {
+    git(repo, ['add', '--renormalize', '--'].concat(list));
+    dismissCommitReject(repo, list, 'restage');
+    note('已重新暂存 ' + list.join('、'), '已重新暂存');
+    if (onStatusFn) onStatusFn();
+    return list;
+  });
 }
 
 function activeEditorPath() {
@@ -41,19 +59,8 @@ function resolveRepo(filePath) {
   return found;
 }
 
-function cmdResolveRoot() {
-  return { root: resolveRepo() };
-}
-
-function formatStatus(st) {
-  const on = st.installed ? 'on' : 'off';
-  const pending = (st.unstable && st.unstable.length) ? (' / ' + st.unstable.length + ' 待处理') : '';
-  const rt = (st.roundtripFails && st.roundtripFails.length) ? (' / ' + st.roundtripFails.length + ' 往返失败') : '';
-  const dropped = (st.cp936Drops && st.cp936Drops.length) ? (' / 丢掉 ' + st.cp936Drops.length) : '';
-  const drift = st.tableDrift ? ' / 表过期' : '';
-  const ff = (st.filterFails >= FILTER_FAIL_LIMIT) ? (' / filter 失败×' + st.filterFails) : '';
-  const libN = (st.libWarnings && st.libWarnings.length) ? (' / 库编码 ' + st.libWarnings.length) : '';
-  return 'zkz-native: ' + on + ' / 表 ' + st.tableCount + ' 项' + pending + rt + dropped + drift + ff + libN;
+function emitStatus(st) {
+  statusLines(st).forEach(emit);
 }
 
 async function cmdEnable(extensionRoot, onStatus) {
@@ -63,15 +70,14 @@ async function cmdEnable(extensionRoot, onStatus) {
     { location: vscode.ProgressLocation.Notification, title: '启用 zkz-native', cancellable: false },
     () => withLock(repo, () => enable(repo, extensionRoot))
   );
-  if (st.unstable && st.unstable.length) {
-    emit('往返不稳定文件（未提交）:');
-    st.unstable.forEach((l) => emit('  ' + l));
-    void vscode.window.showWarningMessage('zkz-native 已启用，但有 ' + st.unstable.length + ' 个往返不稳定文件，见输出');
+  const shown = statusSnapshot(repo);
+  emitStatus(shown);
+  if (shown.unstable && shown.unstable.length) {
+    note('有文件未能对齐编码表');
   } else {
-    void vscode.window.showInformationMessage(formatStatus(st));
+    note('过滤器已启用', 'native 已启用');
   }
-  emit(formatStatus(st));
-  if (onStatus) onStatus(st);
+  if (onStatus) onStatus(shown);
   return st;
 }
 
@@ -82,9 +88,13 @@ async function cmdDisable(onStatus) {
   emit('disabled leftover=' + leftover.length);
   leftover.forEach((l) => emit('  ' + l));
   if (leftover.length) {
-    void vscode.window.showWarningMessage('zkz-native 已关闭，但仍有 ' + leftover.length + ' 个文件未能写回原编码，请关闭这些文件后重试 Disable');
+    note('有文件未能写回原编码');
+    void vscode.window.showWarningMessage('有文件正被占用，关闭编辑器后可以再试。', '重试关闭').then((choice) => {
+      if (choice === '重试关闭') void vscode.commands.executeCommand('zkz-native.disable');
+    });
   } else {
-    void vscode.window.showInformationMessage('zkz-native 已关闭。工作区已按仓库原编码检出。过滤器已卸，git 不再依赖 filter 进程。');
+    emit('工作区已按编码表编回原编码，未提交的修改仍留在工作区。');
+    note('过滤器已关闭', 'native 已关闭');
   }
   if (onStatus) onStatus(statusSnapshot(repo));
   return st;
@@ -99,49 +109,11 @@ function requireInstalled() {
 async function cmdRefresh(extensionRoot, onStatus) {
   const repo = requireInstalled();
   const st = await withLock(repo, () => refresh(repo, extensionRoot, { force: true }));
-  void vscode.window.showInformationMessage(formatStatus(st));
-  if (onStatus) onStatus(st);
+  const shown = statusSnapshot(repo);
+  emitStatus(shown);
+  note('编码表已刷新', 'native 已刷新');
+  if (onStatus) onStatus(shown);
   return st;
-}
-
-function cmdStatus() {
-  const repo = resolveRepo();
-  if (!isInstalled(repo)) {
-    void vscode.window.showInformationMessage('zkz-native 过滤器未启用');
-    return { installed: false };
-  }
-  const st = statusSnapshot(repo);
-  void vscode.window.showInformationMessage(formatStatus(st));
-  return st;
-}
-
-function cmdIsEnabled() {
-  try {
-    return isInstalled(resolveRepo());
-  } catch (_) {
-    return false;
-  }
-}
-
-function cmdCheckRoundtrip() {
-  requireInstalled();
-  const editor = vscode.window.activeTextEditor;
-  if (!editor || editor.document.uri.scheme !== 'file') {
-    throw new Error('请先打开一个 .c/.h 文件');
-  }
-  const repo = resolveRepo();
-  const rel = slashRel(path.relative(repo, editor.document.uri.fsPath));
-  const table = loadTable(repo);
-  const kind = parseMapped(table[rel] || 'Utf8').kind;
-  const text = editor.document.getText();
-  if (kind !== 'Gbk') {
-    void vscode.window.showInformationMessage(rel + ' 表=' + kind + '，无需 cp936 往返');
-    return { ok: true, kind: kind };
-  }
-  const ok = roundtripOk(text);
-  if (!ok) void vscode.window.showErrorMessage(rel + ': cp936 无法无损编码，提交会被拦截');
-  else void vscode.window.showInformationMessage(rel + ': cp936 往返通过');
-  return { ok: ok, kind: kind };
 }
 
 function cmdSyncKeilTree() {
@@ -149,62 +121,31 @@ function cmdSyncKeilTree() {
   return withLock(repo, () => {
     const r = syncKeilTree(repo, emit);
     const n = (r && r.libWarnings && r.libWarnings.length) || 0;
-    if (n) {
-      void vscode.window.showWarningMessage(
-        'zkz-native: ' + n + ' 个库文件编码疑似漂移或损坏。库不过滤，不会自动改回。见 .zkz/run/lib-encoding-warnings.json'
-      );
-      try {
-        const { markLibWarningsNotified } = require('./lib_encoding');
-        markLibWarningsNotified(repo);
-      } catch (_) { /* ignore */ }
-    }
+    if (n) emit(n + ' 个库文件编码疑似漂移或损坏。库不过滤，不会自动改回。');
+    if (onStatusFn) onStatusFn();
     return r;
   });
-}
-
-function cmdCopyDebugAxf() {
-  const repo = requireInstalled();
-  copyDebugAxf(repo, emit);
-  return ['debug axf -> .zkz/output.axf'];
 }
 
 function cmdSaveConfigOverlay() {
   const repo = requireInstalled();
   const r = seedOverlay(repo);
-  emit('config overlay seeded ' + r.seeded.length);
   r.seeded.forEach((f) => emit('  ' + f));
-  void vscode.window.showInformationMessage('已把 ' + r.seeded.length + ' 个本地配置设为权威，切分支后会提示是否还原');
+  note('已保存 ' + r.seeded.length + ' 个本地配置', 'native');
   return r;
 }
 
 function cmdRestoreConfigOverlay() {
   const repo = requireInstalled();
   const r = restoreOverlay(repo);
-  emit('config overlay restored ' + r.restored.length);
-  void vscode.window.showInformationMessage('已还原 ' + r.restored.length + ' 个本地配置');
-  return r;
-}
-
-async function cmdWarmTextconv() {
-  const repo = requireInstalled();
-  const editor = vscode.window.activeTextEditor;
-  if (!editor || editor.document.uri.scheme !== 'file') throw new Error('请先打开一个 .c/.h 文件');
-  const rel = slashRel(path.relative(repo, editor.document.uri.fsPath));
-  if (!/\.(c|h)$/i.test(rel)) throw new Error('只预热 .c/.h 的追溯缓存');
-  const r = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: '预热追溯缓存 ' + rel, cancellable: false },
-    () => withLock(repo, () => warmFile(repo, rel))
-  );
-  const msg = r.added
-    ? '已预热 ' + rel + '：历史 ' + r.blobs + ' 个版本，新写入 ' + r.added + ' 个。请先等正在跑的 git blame 结束，再打开这个文件。'
-    : rel + ' 的追溯缓存已经是热的（' + r.blobs + ' 个版本）。';
-  emit(msg);
-  void vscode.window.showInformationMessage(msg);
+  note('已还原 ' + r.restored.length + ' 个本地配置', 'native');
   return r;
 }
 
 function register(context, extensionRoot, hooks) {
-  const onStatus = typeof hooks === 'function' ? hooks : (hooks && hooks.onStatus);
+  onStatusFn = typeof hooks === 'function' ? hooks : (hooks && hooks.onStatus);
+  onFlash = hooks && hooks.onFlash;
+  const onStatus = onStatusFn;
   const onActive = hooks && hooks.onActive;
   const wrap = (fn) => async () => {
     try { return await fn(); }
@@ -228,21 +169,15 @@ function register(context, extensionRoot, hooks) {
       return st;
     })),
     vscode.commands.registerCommand('zkz-native.refreshTable', wrap(() => cmdRefresh(extensionRoot, onStatus))),
-    vscode.commands.registerCommand('zkz-native.checkRoundtrip', wrap(cmdCheckRoundtrip)),
-    vscode.commands.registerCommand('zkz-native.status', wrap(cmdStatus)),
-    vscode.commands.registerCommand('zkz-native.isEnabled', () => cmdIsEnabled()),
-    vscode.commands.registerCommand('zkz-native.resolveRoot', () => cmdResolveRoot()),
     vscode.commands.registerCommand('zkz-native.syncKeilTree', wrap(cmdSyncKeilTree)),
-    vscode.commands.registerCommand('zkz-native.copyDebugAxf', wrap(cmdCopyDebugAxf)),
     vscode.commands.registerCommand('zkz-native.saveConfigOverlay', wrap(cmdSaveConfigOverlay)),
-    vscode.commands.registerCommand('zkz-native.restoreConfigOverlay', wrap(cmdRestoreConfigOverlay)),
-    vscode.commands.registerCommand('zkz-native.warmTextconv', wrap(cmdWarmTextconv))
+    vscode.commands.registerCommand('zkz-native.restoreConfigOverlay', wrap(cmdRestoreConfigOverlay))
   );
 }
 
 module.exports = {
   register,
-  formatStatus,
   resolveRepo,
-  cmdIsEnabled
+  note,
+  restage
 };

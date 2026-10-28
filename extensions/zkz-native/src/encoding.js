@@ -231,8 +231,8 @@ function applyClean(kind, wtBytes, opts) {
       const hint = firstUnencodable(text);
       const err = new Error('cp936 roundtrip failed' + (hint ? ' (' + hint + ')' : ''));
       err.code = 'ZKZ_ROUNDTRIP';
-      // git status 也会�? clean；required=true 时抛错会让整�? status 失败�?
-      // 往返失败时原样交回工作区字节，提交仍由 pre-commit 拦�?
+      // git status 也会跑 clean；required=true 时抛错会让整个 status 失败。
+      // 往返失败时原样交回工作区字节，提交仍由 pre-commit 拦住。
       if (process.env.ZKZ_NATIVE_STRICT === '1') throw err;
       if (opts && typeof opts.onSoftFail === 'function') {
         try { opts.onSoftFail(err); } catch (_) { /* ignore */ }

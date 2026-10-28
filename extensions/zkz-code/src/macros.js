@@ -4,7 +4,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { evalPpExpr } = require('./pp_expr');
+const { evalPpExpr, evalPpExprResult } = require('./pp_expr');
 
 function vscodeApi() {
   try { return require('vscode'); } catch (_) { return null; }
@@ -23,13 +23,6 @@ function loadMacroKeys() {
   return fallback;
 }
 
-/** 索引快照只在还没有时建立。已有快照保持不变，保存不能把它推进。 */
-function retainIndexSnapshot(indexed, seen, next) {
-  if (indexed && Object.keys(indexed).length) return indexed;
-  if (seen && Object.keys(seen).length) return seen;
-  return next || {};
-}
-
 function isTrackedMacro(name) {
   return loadMacroKeys().includes(name)
     || name.startsWith('MALL_')
@@ -38,14 +31,36 @@ function isTrackedMacro(name) {
     || name.startsWith('MHX_');
 }
 
+const YT_VERSION_RELS = [
+  path.join('core', 'core_common', 'yt_version.h'),
+  path.join('User', 'common', 'yt_version.h'),
+  path.join('core', 'yt_version.h')
+];
+
+function ytVersionCandidates(root) {
+  if (!root) return [];
+  const out = [];
+  for (let i = 0; i < YT_VERSION_RELS.length; i++) {
+    const p = path.join(root, YT_VERSION_RELS[i]);
+    if (fs.existsSync(p)) out.push(p);
+  }
+  return out;
+}
+
 function findYtVersion(root) {
-  const candidates = [
-    path.join(root, 'core', 'core_common', 'yt_version.h'),
-    path.join(root, 'User', 'common', 'yt_version.h'),
-    path.join(root, 'core', 'yt_version.h')
-  ];
-  for (const p of candidates) if (fs.existsSync(p)) return p;
-  return null;
+  const all = ytVersionCandidates(root);
+  return all.length ? all[0] : null;
+}
+
+function isYtVersionPath(root, fsPath) {
+  if (!root || !fsPath) return false;
+  const rel = path.relative(root, fsPath);
+  if (!rel || rel.startsWith('..')) return false;
+  const norm = path.normalize(rel).toLowerCase();
+  for (let i = 0; i < YT_VERSION_RELS.length; i++) {
+    if (path.normalize(YT_VERSION_RELS[i]).toLowerCase() === norm) return true;
+  }
+  return false;
 }
 
 function findClangdConfig(root) {
@@ -94,10 +109,8 @@ function parseClangdCompileDefines(text) {
     if (!inAdd) continue;
     const m = raw.match(/^\s+-\s+(.+)$/);
     if (!m) continue;
-    let flag = m[1].trim();
-    if ((flag.startsWith('"') && flag.endsWith('"')) || (flag.startsWith("'") && flag.endsWith("'"))) {
-      flag = flag.slice(1, -1);
-    }
+    const flag = stripYamlFlag(m[1].trim());
+    if (!flag) continue;
     if (flag.startsWith('-D')) {
       const body = flag.slice(2);
       if (!body) continue;
@@ -110,6 +123,32 @@ function parseClangdCompileDefines(text) {
     }
   }
   return macros;
+}
+
+/** 去掉 YAML 行尾注释和一层引号。`#` 只有在引号外且前面是空白时才算注释。 */
+function stripYamlFlag(flag) {
+  let out = '';
+  let q = '';
+  for (let i = 0; i < flag.length; i++) {
+    const c = flag[i];
+    if (q) {
+      out += c;
+      if (c === q) q = '';
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      q = c;
+      out += c;
+      continue;
+    }
+    if (c === '#' && (i === 0 || /\s/.test(flag[i - 1]))) break;
+    out += c;
+  }
+  out = out.trim();
+  if ((out.startsWith('"') && out.endsWith('"')) || (out.startsWith("'") && out.endsWith("'"))) {
+    out = out.slice(1, -1).trim();
+  }
+  return out;
 }
 
 function findOpenDoc(filePath) {
@@ -166,6 +205,7 @@ function parseFullMacroTable(text, initialMacros) {
   let li = 0;
   while (li < lines.length) {
     let line = lines[li];
+    const startLi = li;
     while (/\\\s*$/.test(line) && li + 1 < lines.length) {
       li += 1;
       line = line.replace(/\\\s*$/, '') + lines[li];
@@ -180,8 +220,15 @@ function parseFullMacroTable(text, initialMacros) {
     if (/^if\b/.test(body) && !/^ifdef\b/.test(body) && !/^ifndef\b/.test(body)) {
       const expr = body.replace(/^if\b/, '').trim();
       const parent = effectiveActive();
-      const val = parent ? evalPpExpr(expr, macros) : false;
-      stack.push({ active: parent && val, seenTrue: parent && val });
+      if (!parent) {
+        stack.push({ active: false, seenTrue: false, bad: false });
+      } else {
+        const r = evalPpExprResult(expr, macros);
+        // 解析失败不能当成假，否则 #else 会吃进不该生效的宏
+        stack.push(r.ok
+          ? { active: r.value, seenTrue: r.value, bad: false }
+          : { active: false, seenTrue: false, bad: true });
+      }
       li += 1;
       continue;
     }
@@ -189,7 +236,7 @@ function parseFullMacroTable(text, initialMacros) {
       const name = body.replace(/^ifdef\b/, '').trim().split(/\s+/)[0];
       const parent = effectiveActive();
       const val = parent && (name in macros);
-      stack.push({ active: !!val, seenTrue: !!val });
+      stack.push({ active: !!val, seenTrue: !!val, bad: false });
       li += 1;
       continue;
     }
@@ -197,7 +244,7 @@ function parseFullMacroTable(text, initialMacros) {
       const name = body.replace(/^ifndef\b/, '').trim().split(/\s+/)[0];
       const parent = effectiveActive();
       const val = parent && !(name in macros);
-      stack.push({ active: !!val, seenTrue: !!val });
+      stack.push({ active: !!val, seenTrue: !!val, bad: false });
       li += 1;
       continue;
     }
@@ -205,13 +252,18 @@ function parseFullMacroTable(text, initialMacros) {
       if (stack.length) {
         const top = stack[stack.length - 1];
         const parent = stack.slice(0, -1).every((f) => f.active);
-        if (!parent || top.seenTrue) {
+        if (!parent || top.seenTrue || top.bad) {
           top.active = false;
         } else {
           const expr = body.replace(/^elif\b/, '').trim();
-          const val = evalPpExpr(expr, macros);
-          top.active = val;
-          if (val) top.seenTrue = true;
+          const r = evalPpExprResult(expr, macros);
+          if (!r.ok) {
+            top.active = false;
+            top.bad = true;
+          } else {
+            top.active = r.value;
+            if (r.value) top.seenTrue = true;
+          }
         }
       }
       li += 1;
@@ -221,7 +273,7 @@ function parseFullMacroTable(text, initialMacros) {
       if (stack.length) {
         const top = stack[stack.length - 1];
         const parent = stack.slice(0, -1).every((f) => f.active);
-        top.active = parent && !top.seenTrue;
+        top.active = parent && !top.seenTrue && !top.bad;
         if (top.active) top.seenTrue = true;
       }
       li += 1;
@@ -261,7 +313,7 @@ function parseFullMacroTable(text, initialMacros) {
     val = val.replace(/\/\/.*$/, '').trim();
     if (val.startsWith('//')) val = '';
     macros[name] = val;
-    locs[name] = li + 1;
+    locs[name] = startLi + 1;
     li += 1;
   }
   return { macros, locs };
@@ -277,12 +329,8 @@ function getYtVersionText(filePath) {
   const doc = findOpenDoc(filePath);
   if (doc) return doc.getText();
   // 按内容探测编码，避免当 UTF-8 读坏 GBK 文件
-  try {
-    const { bufferToText } = require('./encoding');
-    return bufferToText(fs.readFileSync(filePath));
-  } catch (_) {
-    return fs.readFileSync(filePath, 'utf8');
-  }
+  const { bufferToText } = require('./encoding');
+  return bufferToText(fs.readFileSync(filePath));
 }
 
 function inferWorkspaceRoot(filePath) {
@@ -349,92 +397,6 @@ let gTableCache = emptyMacroTable();
 function invalidateMacroTable() {
   gTableCache = emptyMacroTable();
   gClangdCache = { key: '', macros: {} };
-  gPublishedKey = '';
-}
-
-function macroTableFile(root) {
-  return path.join(root, '.zkz', 'run', 'macro-table.json');
-}
-
-function relocateMacroTable(root) {
-  const from = path.join(root, '.zkz', 'macro-table.json');
-  const to = macroTableFile(root);
-  try {
-    if (!fs.existsSync(from) || fs.existsSync(to)) return;
-    fs.mkdirSync(path.dirname(to), { recursive: true });
-    fs.renameSync(from, to);
-  } catch (_) { /* ignore */ }
-}
-
-function gitExcludeFile(root) {
-  const dot = path.join(root, '.git');
-  let gitDir = '';
-  try {
-    const st = fs.statSync(dot);
-    if (st.isDirectory()) gitDir = dot;
-    else {
-      const text = fs.readFileSync(dot, 'utf8');
-      const m = text.match(/^gitdir:\s*(.+)$/m);
-      if (m) gitDir = path.resolve(root, m[1].trim());
-    }
-  } catch (_) {
-    return '';
-  }
-  return gitDir ? path.join(gitDir, 'info', 'exclude') : '';
-}
-
-/** 本地 exclude 里补一行，避免宏表出现在更改列表。不写进 native 的过滤器标记块。 */
-function ensureMacroTableExcluded(root) {
-  const file = gitExcludeFile(root);
-  if (!file) return;
-  const line = '.zkz/run/macro-table.json';
-  let cur = '';
-  try { if (fs.existsSync(file)) cur = fs.readFileSync(file, 'utf8'); } catch (_) { return; }
-  if (cur.split(/\r?\n/).some((l) => l.trim() === line)) return;
-  try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const prefix = cur && !/\n$/.test(cur) ? cur + '\n' : cur;
-    fs.writeFileSync(file, prefix + line + '\n', 'utf8');
-  } catch (_) { /* ignore */ }
-}
-
-let gPublishedKey = '';
-
-function removeMacroTable(root) {
-  if (!root) return;
-  const paths = [
-    macroTableFile(root),
-    path.join(root, '.zkz', 'macro-table.json')
-  ];
-  for (let i = 0; i < paths.length; i++) {
-    try { if (fs.existsSync(paths[i])) fs.unlinkSync(paths[i]); } catch (_) { /* ignore */ }
-  }
-  gPublishedKey = '';
-}
-
-function publishMacroTable(root, table) {
-  if (!root || !table || !table.ready) return '';
-  relocateMacroTable(root);
-  const file = macroTableFile(root);
-  const names = Object.keys(table.macros).sort();
-  const macros = {};
-  for (let i = 0; i < names.length; i++) macros[names[i]] = table.macros[names[i]];
-  const body = JSON.stringify({
-    file: table.filePath || '',
-    ready: true,
-    count: names.length,
-    macros: macros
-  }, null, 2) + '\n';
-  try {
-    if (gPublishedKey === table.key && fs.existsSync(file)) return file;
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    let cur = '';
-    try { if (fs.existsSync(file)) cur = fs.readFileSync(file, 'utf8'); } catch (_) { cur = ''; }
-    if (cur !== body) fs.writeFileSync(file, body, 'utf8');
-    ensureMacroTableExcluded(root);
-    gPublishedKey = table.key;
-  } catch (_) { /* 写不出不影响折叠 */ }
-  return file;
 }
 
 function getMacroTable() {
@@ -450,7 +412,6 @@ function loadMacroTable(opts) {
   const root = opts.workspaceRoot || resolveMacroRoot(opts.filePath || '');
   const ver = opts.filePath || (root ? findYtVersion(root) : null);
   if (!ver && opts.text == null) {
-    removeMacroTable(root);
     gTableCache = emptyMacroTable();
     return gTableCache;
   }
@@ -467,10 +428,7 @@ function loadMacroTable(opts) {
     textKey = 'none';
   }
   const key = (ver || '') + '|' + textKey + '|' + clangdKey;
-  if (gTableCache.key === key && gTableCache.ready) {
-    publishMacroTable(root, gTableCache);
-    return gTableCache;
-  }
+  if (gTableCache.key === key && gTableCache.ready) return gTableCache;
   if (text == null) text = ver ? getYtVersionText(ver) : '';
   const clangd = loadClangdLayer(root);
   const parsed = parseFullMacroTable(text, clangd.macros);
@@ -482,7 +440,6 @@ function loadMacroTable(opts) {
     ready,
     filePath: ver || ''
   };
-  publishMacroTable(root, gTableCache);
   return gTableCache;
 }
 
@@ -534,10 +491,6 @@ function machineLabel(macros) {
   return mv != null ? String(mv) : '?';
 }
 
-function machineFingerprint(macros) {
-  return [macros.MACHINE_VALUE || '', macros.MALL_MULTI || '', macros.CUSTOMER_SET || '', macros.GROUP_MACHINE || ''].join('|');
-}
-
 function shortCustomerLabel(val) {
   const v = String(val).trim();
   if (/^COMSTOM_/i.test(v)) return v.replace(/^COMSTOM_/i, '');
@@ -572,26 +525,21 @@ function formatMacroLines(macros) {
 
 function formatMacroBadge(macros) {
   const parts = [machineLabel(macros)];
-  if (macroIsShown(macros.SCREEN_800_480) && macros.SCREEN_800_480 != null && macros.SCREEN_800_480 !== '') {
-    parts.push('SCR=' + macros.SCREEN_800_480);
-  }
-  if (macroIsShown(macros.MALL_DOUBLE) && macros.MALL_DOUBLE != null && macros.MALL_DOUBLE !== '') {
-    parts.push('DBL=' + macros.MALL_DOUBLE);
-  }
-  if (macroIsShown(macros.MLS_BLOW_SUCTION) && macros.MLS_BLOW_SUCTION != null && macros.MLS_BLOW_SUCTION !== '') {
-    parts.push('BLOW=' + macros.MLS_BLOW_SUCTION);
-  }
-  if (isCustomerShown(macros.CUSTOMER_SET)) {
-    parts.push('CUST=' + shortCustomerLabel(macros.CUSTOMER_SET));
-  }
-  if (isGroupMachineShown(macros.GROUP_MACHINE)) {
-    parts.push('GRP=' + shortGroupMachineLabel(macros.GROUP_MACHINE));
-  }
+  const listed = {};
+  const names = listedMacroNames(macros);
+  for (let i = 0; i < names.length; i++) listed[names[i]] = true;
+  if (listed.SCREEN_800_480) parts.push('SCR=' + macros.SCREEN_800_480);
+  if (listed.MALL_DOUBLE) parts.push('DBL=' + macros.MALL_DOUBLE);
+  if (listed.MLS_BLOW_SUCTION) parts.push('BLOW=' + macros.MLS_BLOW_SUCTION);
+  if (listed.CUSTOMER_SET) parts.push('CUST=' + shortCustomerLabel(macros.CUSTOMER_SET));
+  if (listed.GROUP_MACHINE) parts.push('GRP=' + shortGroupMachineLabel(macros.GROUP_MACHINE));
   return parts.join(' | ');
 }
 
 module.exports = {
   findYtVersion,
+  ytVersionCandidates,
+  isYtVersionPath,
   findClangdConfig,
   resolveMacroRoot,
   parseClangdCompileDefines,
@@ -600,17 +548,13 @@ module.exports = {
   loadMacroTable,
   invalidateMacroTable,
   getMacroTable,
-  macroTableFile,
-  publishMacroTable,
   isMacroEnvReady,
   evalPpExpr,
   getYtVersionText,
   revealMacroInYtVersion,
   isTrackedMacro,
-  retainIndexSnapshot,
   isMacroKeyShown,
   machineLabel,
-  machineFingerprint,
   formatMacroLines,
   listedMacroNames,
   formatMacroBadge

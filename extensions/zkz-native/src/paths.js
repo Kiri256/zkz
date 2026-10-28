@@ -30,6 +30,7 @@ const RUN_FILE_NAMES = [
   'lib-encoding-warnings.json',
   'zkz-native.log',
   'native-status.json',
+  'commit-reject.json',
   'compile-commands-stamp.json',
   'compile-commands-cache.json',
   'macro-table.json',
@@ -359,6 +360,10 @@ function nativeStatusPath(repoRoot) {
   return runFile(repoRoot, 'native-status.json');
 }
 
+function commitRejectPath(repoRoot) {
+  return runFile(repoRoot, 'commit-reject.json');
+}
+
 function appendLog(repoRoot, msg) {
   if (process.env.ZKZ_NATIVE_LOG !== '1') return;
   try {
@@ -416,5 +421,6 @@ module.exports = {
   libEncodingWarnPath,
   nativeLogFile,
   nativeStatusPath,
+  commitRejectPath,
   appendLog
 };

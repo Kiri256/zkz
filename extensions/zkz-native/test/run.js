@@ -529,10 +529,15 @@ test('attributes mark block', () => {
 
 test('precommit rejects Gbk table with UTF-8 blob', () => {
   const { evaluateStagedBlob } = require('../src/precommit');
-  const utf = Buffer.from('emoji \u{1F600}\n', 'utf8');
-  const r = evaluateStagedBlob('core/a.c', utf, 'Gbk');
-  assert.ok(r.error);
-  assert.ok(r.error.indexOf('UTF-8') >= 0 || r.error.indexOf('Utf8') >= 0);
+  const emoji = evaluateStagedBlob('core/a.c', Buffer.from('emoji \u{1F600}\n', 'utf8'), 'Gbk');
+  assert.ok(emoji.error.indexOf('无法编回 cp936') >= 0);
+  assert.ok(emoji.error.indexOf('请重新 git add') < 0);
+  assert.strictEqual(emoji.action, 'open');
+  assert.ok(emoji.position > 0);
+  const chinese = evaluateStagedBlob('core/a.c', Buffer.from('\u4e2d\u6587\n', 'utf8'), 'Gbk');
+  assert.ok(chinese.error.indexOf('请重新 git add：core/a.c') >= 0);
+  assert.strictEqual(chinese.action, 'restage');
+  assert.strictEqual(chinese.rel, 'core/a.c');
 });
 
 test('precommit accepts Gbk blob for Gbk table', () => {
@@ -851,9 +856,16 @@ test('config overlay seed/restore across branch loss', () => {
     fs.mkdirSync(path.join(root, '.vscode'), { recursive: true });
     const cfg = path.join(root, '.vscode', 'settings.json');
     fs.writeFileSync(cfg, '{ "local": true }', 'utf8');
+    const { overlayDrift } = require('../src/overlay');
+    assert.strictEqual(overlayDrift(root), 'missing');
     assert.ok(!overlaySeeded(root));
     assert.ok(seedOverlay(root).seeded.indexOf('.vscode/settings.json') >= 0);
     assert.ok(overlaySeeded(root));
+    assert.strictEqual(overlayDrift(root), 'same');
+    fs.writeFileSync(cfg, '{ "local": false }', 'utf8');
+    assert.strictEqual(overlayDrift(root), 'changed');
+    fs.writeFileSync(cfg, '{ "local": true }', 'utf8');
+    assert.strictEqual(overlayDrift(root), 'same');
     fs.unlinkSync(cfg);
     assert.ok(restoreOverlay(root).restored.indexOf('.vscode/settings.json') >= 0);
     assert.strictEqual(fs.readFileSync(cfg, 'utf8'), '{ "local": true }');
@@ -884,9 +896,6 @@ test('config_paths merge lists for overlay save/restore', () => {
     assert.ok(cfg.overlay.indexOf('.vscode') >= 0);
     assert.ok(cfg.overlay.indexOf('AGENTS.md') >= 0);
     assert.ok(cfg.skipWorktree.indexOf('.cursor') >= 0);
-    assert.ok(cfg.forbidStage.indexOf('AGENTS.md') < 0);
-    assert.ok(cfg.forbidStage.indexOf('.zkz/config_paths.json') >= 0);
-    assert.ok(cfg.forbidStage.indexOf('.zkz/settings.json') >= 0);
     fs.mkdirSync(path.join(root, '.cursor', 'rules'), { recursive: true });
     fs.mkdirSync(path.join(root, '.vscode'), { recursive: true });
     fs.writeFileSync(path.join(root, '.cursor', 'rules', 'a.mdc'), 'rule', 'utf8');
@@ -1005,6 +1014,8 @@ test('installHooks strips legacy post-checkout native block', () => {
   const pre = fs.readFileSync(hookFile(root, 'pre-commit'), 'utf8');
   assert.ok(pre.indexOf('hook_runner.js') >= 0);
   assert.ok(pre.indexOf('pre-commit') >= 0);
+  assert.ok(pre.indexOf('_zkz_native_status') >= 0);
+  assert.ok(pre.indexOf('\nexec ') < 0);
 });
 
 test('readHeadOid loose ref, detached, packed-refs', () => {
@@ -1127,6 +1138,112 @@ test('lib encoding flags gbk-to-utf8 and fffd, not ascii edits', () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('status label and encoding actions', () => {
+  const { barLabel, encodingActions } = require('../src/bootstrap');
+  assert.strictEqual(barLabel({ installed: false }), 'native 关');
+  assert.strictEqual(barLabel({ installed: true }), 'native 开');
+  assert.strictEqual(barLabel({ installed: true, filterFails: 3, roundtripFails: ['a.c'] }), 'native 开');
+  assert.strictEqual(barLabel({ installed: true, roundtripFails: ['a.c'], libWarnings: [{}] }), 'native 开');
+  assert.strictEqual(barLabel({ installed: true, libWarnings: [{}] }), 'native 开');
+  assert.strictEqual(barLabel({ installed: true, commitRejects: [{ rel: 'a.c' }] }), 'native 开');
+  assert.strictEqual(barLabel({ installed: true, unstable: ['a.c'] }), 'native 开');
+  const actions = encodingActions({
+    commitRejects: [
+      { rel: 'User/a.c', action: 'restage', message: '请重新 git add' },
+      { rel: 'User/b.c', action: 'open', message: 'User/b.c: 无法编回', position: 4 }
+    ],
+    roundtripItems: [{ rel: 'User/a.c', message: 'cp936 roundtrip failed (U+1F600 at 2)' }, { rel: 'User/c.c', message: 'failed at 9' }],
+    cp936DropItems: [{ rel: 'User/d.c', positions: [3], message: '' }],
+    unstable: ['User/e.c', 'User/b.c']
+  });
+  assert.deepStrictEqual(actions.restage.map((x) => x.rel), ['User/a.c']);
+  assert.deepStrictEqual(actions.opens.map((x) => x.rel), ['User/b.c', 'User/c.c', 'User/d.c']);
+  assert.strictEqual(actions.opens[1].position, 9);
+  assert.strictEqual(actions.opens[2].position, 3);
+  assert.deepStrictEqual(actions.unstable, ['User/e.c']);
+});
+
+test('commit rejection is recorded for the status bar', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const { recordCommitReject, loadCommitRejects, dismissCommitReject, clearCommitReject } = require('../src/observe');
+  const { evaluateStagedBlob } = require('../src/precommit');
+  const { commitRejectPath } = require('../src/paths');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-reject-'));
+  try {
+    const rel = 'User/a.c';
+    fs.mkdirSync(path.join(root, 'User'), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), 'x');
+    const restage = evaluateStagedBlob(rel, Buffer.from('\u4e2d\u6587\n', 'utf8'), 'Gbk');
+    const open = evaluateStagedBlob(rel, Buffer.from('emoji \u{1F600}\n', 'utf8'), 'Gbk');
+    assert.strictEqual(restage.action, 'restage');
+    assert.strictEqual(restage.rel, rel);
+    assert.strictEqual(open.action, 'open');
+    assert.ok(open.position > 0);
+    recordCommitReject(root, [restage, open]);
+    assert.strictEqual(loadCommitRejects(root).length, 2);
+    dismissCommitReject(root, ['User/a.c'], 'restage');
+    const left = loadCommitRejects(root);
+    assert.strictEqual(left.length, 1);
+    assert.strictEqual(left[0].action, 'open');
+    clearCommitReject(root);
+    assert.ok(!fs.existsSync(commitRejectPath(root)));
+    assert.strictEqual(loadCommitRejects(root).length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('fixed worktree clears a stale commit rejection', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const { spawnSync } = require('child_process');
+  const { encodeCp936 } = require('../src/encoding');
+  const { saveTable } = require('../src/enc_table');
+  const { recordCommitReject } = require('../src/observe');
+  const { reconcileCommitReject } = require('../src/precommit');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-reconcile-'));
+  const git = (args, input) => {
+    const r = spawnSync('git', args, { cwd: root, input: input, windowsHide: true, encoding: input ? undefined : 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+    return Buffer.isBuffer(r.stdout) ? r.stdout.toString('utf8').trim() : String(r.stdout || '').trim();
+  };
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    fs.writeFileSync(path.join(root, 'a.c'), '\u4e2d\u6587\n', 'utf8');
+    git(['add', 'a.c']);
+    saveTable(root, { 'a.c': 'Gbk' });
+    recordCommitReject(root, [{ rel: 'a.c', action: 'open', message: 'a.c: old' }]);
+    let left = reconcileCommitReject(root);
+    assert.strictEqual(left.length, 1);
+    assert.strictEqual(left[0].action, 'restage');
+    fs.writeFileSync(path.join(root, 'a.c'), 'emoji \u{1F600}\n', 'utf8');
+    left = reconcileCommitReject(root);
+    assert.strictEqual(left.length, 1);
+    assert.strictEqual(left[0].action, 'open');
+    fs.writeFileSync(path.join(root, 'a.c'), '\u4e2d\u6587\n', 'utf8');
+    const sha = git(['hash-object', '-w', '--stdin'], encodeCp936('\u4e2d\u6587\n'));
+    git(['update-index', '--cacheinfo', '100644,' + sha + ',a.c']);
+    left = reconcileCommitReject(root);
+    assert.strictEqual(left.length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ascii staged chinese asks to restage and emoji does not', () => {
+  const { evaluateStagedBlob } = require('../src/precommit');
+  const chinese = evaluateStagedBlob('core/a.c', Buffer.from('\u4e2d\u6587\n', 'utf8'), 'Ascii');
+  assert.ok(chinese.error.indexOf('请重新 git add') >= 0);
+  const emoji = evaluateStagedBlob('core/a.c', Buffer.from('emoji \u{1F600}\n', 'utf8'), 'Ascii');
+  assert.ok(emoji.error.indexOf('无法编回 cp936') >= 0);
+  assert.ok(/at \d+/.test(emoji.error));
 });
 
 function finish(extraFailed) {
@@ -1532,34 +1649,122 @@ async function runAsync() {
 
   try {
     const { spawnSync } = require('child_process');
-    const { warmFile } = require('../src/textconv_cache');
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-warm-repo-'));
-    const git = (args, input) => {
-      const r = spawnSync('git', args, { cwd: dir, windowsHide: true, input: input, encoding: 'utf8' });
-      assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+    const { encodeCp936, detectKind, parseMapped } = require('../src/encoding');
+    const { saveTable, loadTable, buildTable } = require('../src/enc_table');
+    const { checkStaged } = require('../src/precommit');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-inc-table-'));
+    const git = (args) => {
+      const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+      if (r.status !== 0) throw new Error(args.join(' ') + '\n' + (r.stderr || r.stdout));
+      return String(r.stdout || '').trim();
     };
-    try {
-      git(['init', '-q']);
-      git(['config', 'user.email', 't@example.com']);
-      git(['config', 'user.name', 't']);
-      git(['config', 'diff.zkznative.textconv', 'textconv-test']);
-      fs.writeFileSync(path.join(dir, 'a.c'), 'int a;\n');
-      git(['add', 'a.c']);
-      git(['commit', '-q', '-m', 'a']);
-      fs.writeFileSync(path.join(dir, 'a.c'), 'int b;\n');
-      git(['add', 'a.c']);
-      git(['commit', '-q', '-m', 'b']);
-      const first = await warmFile(dir, 'a.c');
-      assert.strictEqual(first.added, 2);
-      const second = await warmFile(dir, 'a.c');
-      assert.strictEqual(second.blobs, 2);
-      assert.strictEqual(second.added, 0);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-    ok('warmFile streams history and a second pass adds nothing');
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'false']);
+    git(['config', 'diff.renames', 'copies']);
+    fs.writeFileSync(path.join(dir, 'a.c'), 'int a;\n');
+    git(['add', 'a.c']);
+    git(['commit', '-q', '-m', 'base']);
+    const base = git(['rev-parse', 'HEAD']);
+    saveTable(dir, { 'a.c': 'Gbk+crlf' });
+    fs.writeFileSync(path.join(dir, 'a.c'), 'int a;\nint b;\n');
+    git(['add', 'a.c']);
+    git(['commit', '-q', '-m', 'edit']);
+    const edited = git(['rev-parse', 'HEAD']);
+    const kept = await buildTable(dir, { from: base, to: edited });
+    assert.strictEqual(kept.files['a.c'], 'Gbk+crlf');
+    git(['mv', 'a.c', 'b.c']);
+    fs.writeFileSync(path.join(dir, 'c.c'), 'int a;\nint b;\n');
+    git(['add', '-A']);
+    git(['commit', '-q', '-m', 'move']);
+    const moved = git(['rev-parse', 'HEAD']);
+    const next = await buildTable(dir, { from: edited, to: moved });
+    assert.strictEqual(next.files['b.c'], 'Gbk+crlf');
+    assert.strictEqual(next.files['a.c'], undefined);
+    assert.strictEqual(next.files['c.c'], 'Gbk+crlf');
+    assert.strictEqual(parseMapped(loadTable(dir)['b.c']).kind, 'Gbk');
+    ok('incremental table keeps modified encodings and copied sources');
+    fs.rmSync(dir, { recursive: true, force: true });
   } catch (e) {
-    fail('warmFile streams history and a second pass adds nothing', e);
+    fail('incremental table keeps modified encodings and copied sources', e);
+  }
+
+  try {
+    const { spawnSync } = require('child_process');
+    const { encodeCp936, detectKind, decodeCp936 } = require('../src/encoding');
+    const { saveTable, loadTable } = require('../src/enc_table');
+    const { checkStaged } = require('../src/precommit');
+    const { parseMapped } = require('../src/encoding');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-rename-gbk-'));
+    const git = (args, encoding) => {
+      const r = spawnSync('git', args, { cwd: dir, encoding: encoding || 'utf8' });
+      if (r.status !== 0) throw new Error(args.join(' ') + '\n' + (r.stderr || r.stdout));
+      return r.stdout;
+    };
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'false']);
+    const text = '// \u4e2d\u6587\n';
+    fs.writeFileSync(path.join(dir, 'a.c'), encodeCp936(text));
+    git(['add', 'a.c']);
+    git(['commit', '-q', '-m', 'base']);
+    saveTable(dir, { 'a.c': 'Gbk' });
+    const filter = require.resolve('../src/filter_process.js').replace(/\\/g, '/');
+    const node = process.execPath.replace(/\\/g, '/');
+    git(['config', 'filter.zkznative.process', '"' + node + '" "' + filter + '"']);
+    git(['config', 'filter.zkznative.required', 'true']);
+    fs.mkdirSync(path.join(dir, '.git', 'info'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.git', 'info', 'attributes'), '*.c filter=zkznative -text\n');
+    fs.writeFileSync(path.join(dir, 'b.c'), Buffer.from(text, 'utf8'));
+    fs.unlinkSync(path.join(dir, 'a.c'));
+    git(['add', '-A']);
+    const rejected = await checkStaged(dir);
+    assert.ok(rejected.errors.length, JSON.stringify(rejected));
+    assert.ok(rejected.errors.join('\n').indexOf('重新 git add') >= 0, rejected.errors.join('\n'));
+    assert.strictEqual(parseMapped(loadTable(dir)['b.c']).kind, 'Gbk');
+    git(['add', '--renormalize', '--', 'b.c']);
+    const again = await checkStaged(dir);
+    assert.deepStrictEqual(again.errors, [], JSON.stringify(again));
+    const blob = git(['show', ':b.c'], 'buffer');
+    assert.strictEqual(detectKind(blob), 'Gbk');
+    assert.strictEqual(decodeCp936(blob), text);
+    ok('gbk rename is rejected until it is re-added in gbk');
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch (e) {
+    fail('gbk rename is rejected until it is re-added in gbk', e);
+  }
+
+  try {
+    const { spawnSync } = require('child_process');
+    const { encodeCp936 } = require('../src/encoding');
+    const { findPushedEncodingErrors } = require('../src/precommit');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-push-gbk-'));
+    const git = (args) => {
+      const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+      if (r.status !== 0) throw new Error(args.join(' ') + '\n' + (r.stderr || r.stdout));
+      return String(r.stdout || '').trim();
+    };
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'false']);
+    fs.writeFileSync(path.join(dir, 'a.c'), encodeCp936('// \u4e2d\u6587\n'));
+    git(['add', 'a.c']);
+    git(['commit', '-q', '-m', 'gbk']);
+    const base = git(['rev-parse', 'HEAD']);
+    fs.writeFileSync(path.join(dir, 'a.c'), Buffer.from('// \u4e2d\u6587\nint y;\n', 'utf8'));
+    git(['add', 'a.c']);
+    git(['commit', '-q', '-m', 'utf8']);
+    const head = git(['rev-parse', 'HEAD']);
+    const errors = await findPushedEncodingErrors(dir, base, head);
+    assert.strictEqual(errors.length, 1);
+    assert.ok(errors[0].indexOf('a.c') >= 0, errors.join('\n'));
+    ok('push rejects a gbk file rewritten as utf8');
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch (e) {
+    fail('push rejects a gbk file rewritten as utf8', e);
   }
 
   finish(extra);
@@ -1810,35 +2015,217 @@ test('runtime files move from .zkz into .zkz/run', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('textconv notes keep the validity message and both fanout entries', () => {
+test('live lock owner is not stolen after the ttl', () => {
+  const os = require('os');
   const fs = require('fs');
   const path = require('path');
+  const { isStale, lockDirFor } = require('../src/lock');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-live-lock-'));
+  const ld = lockDirFor(dir);
+  fs.mkdirSync(ld, { recursive: true });
+  fs.writeFileSync(path.join(ld, 'owner.json'), JSON.stringify({
+    pid: process.pid,
+    at: Date.now() - 120000
+  }), 'utf8');
+  assert.strictEqual(isStale(ld), false);
+  fs.writeFileSync(path.join(ld, 'owner.json'), JSON.stringify({
+    pid: 99999999,
+    at: Date.now()
+  }), 'utf8');
+  assert.strictEqual(isStale(ld), true);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('corrupt encoding table is not replaced with an empty one', () => {
   const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { loadTable, noteNewFile } = require('../src/enc_table');
+  const { tablePath } = require('../src/paths');
+  const { lockDirFor } = require('../src/lock');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-bad-table-'));
+  const file = tablePath(dir);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '{', 'utf8');
+  assert.throws(() => loadTable(dir), /编码表无法解析/);
+  assert.throws(() => noteNewFile(dir, 'a.c', 'Utf8'));
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), '{');
+  assert.strictEqual(fs.existsSync(lockDirFor(dir, 'encoding-table')), false);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('ascii source with chinese cleans back to gbk', () => {
+  const table = { 'User/a.c': 'Ascii' };
+  const text = '// \u4e2d\u6587\n';
+  const out = clean('User/a.c', Buffer.from(text, 'utf8'), table);
+  assert.ok(out.equals(encodeCp936(text)));
+  assert.strictEqual(table['User/a.c'], 'Gbk');
+});
+
+test('ascii source with emoji stays unchanged', () => {
+  const table = { 'User/a.c': 'Ascii' };
+  const wt = Buffer.from('emoji \u{1F600}\n', 'utf8');
+  const out = clean('User/a.c', wt, table);
+  assert.ok(out.equals(wt));
+  assert.strictEqual(table['User/a.c'], 'Ascii');
+});
+
+test('precommit rejects ascii table with non-ascii blob', () => {
+  const { evaluateStagedBlob } = require('../src/precommit');
+  const r = evaluateStagedBlob('core/a.c', Buffer.from('\u4e2d\u6587\n', 'utf8'), 'Ascii');
+  assert.ok(r.error);
+});
+
+test('indexBlobOid matches staged git oids', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
   const { spawnSync } = require('child_process');
-  const { insertNotes, commitMessage, TEXTCONV_NOTES } = require('../src/textconv_cache');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-notes-'));
-  const git = (args, input) => {
-    const r = spawnSync('git', args, { cwd: dir, windowsHide: true, input: input, encoding: 'utf8' });
+  const { indexBlobOid } = require('../src/git_exec');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-index-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
     assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
-    return String(r.stdout || '').trim();
+    return String(r.stdout || '');
   };
-  try {
-    git(['init', '-q']);
-    const a = git(['hash-object', '-w', '--stdin'], 'alpha');
-    const b = git(['hash-object', '-w', '--stdin'], 'beta');
-    const na = git(['hash-object', '-w', '--stdin'], 'ALPHA');
-    const nb = git(['hash-object', '-w', '--stdin'], 'BETA');
-    const validity = Buffer.from('"node" "textconv.js"', 'utf8');
-    insertNotes(dir, [{ objectSha: a, noteSha: na }], validity);
-    assert.ok(commitMessage(dir, TEXTCONV_NOTES).equals(validity));
-    insertNotes(dir, [{ objectSha: b, noteSha: nb }], validity);
-    assert.ok(commitMessage(dir, TEXTCONV_NOTES).equals(validity));
-    const read = (sha) => git(['cat-file', '-p', TEXTCONV_NOTES + ':' + sha.slice(0, 2) + '/' + sha.slice(2)]);
-    assert.strictEqual(read(a), 'ALPHA');
-    assert.strictEqual(read(b), 'BETA');
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+  git(['init', '-q']);
+  git(['config', 'user.email', 'a@b.c']);
+  git(['config', 'user.name', 't']);
+  fs.mkdirSync(path.join(dir, 'User', 'new dir'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'root.c'), 'int root;\n');
+  fs.writeFileSync(path.join(dir, 'User', 'new dir', 'a.c'), 'int a;\n');
+  git(['add', '.']);
+  const listed = git(['ls-files', '-s', '-z']).split('\0').filter(Boolean);
+  assert.ok(listed.length >= 2);
+  for (let i = 0; i < listed.length; i++) {
+    const tab = listed[i].indexOf('\t');
+    const rel = listed[i].slice(tab + 1).replace(/\\/g, '/');
+    const oid = listed[i].slice(0, tab).split(' ')[1];
+    assert.strictEqual(indexBlobOid(dir, rel), oid, rel);
   }
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('clean of a tracked gbk file missing from the table keeps the blob encoding', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { loadTable } = require('../src/enc_table');
+  const { parseMapped } = require('../src/encoding');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-tracked-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+    return r.stdout;
+  };
+  git(['init', '-q']);
+  git(['config', 'user.email', 'a@b.c']);
+  git(['config', 'user.name', 't']);
+  git(['config', 'core.autocrlf', 'false']);
+  const text = '// \u4e2d\u6587\n';
+  const gbk = encodeCp936(text);
+  fs.writeFileSync(path.join(dir, 'a.c'), gbk);
+  git(['add', 'a.c']);
+  git(['commit', '-q', '-m', 'init']);
+  const out = clean('a.c', Buffer.from(text, 'utf8'), {}, dir);
+  assert.ok(out.equals(gbk));
+  assert.strictEqual(parseMapped(loadTable(dir)['a.c']).kind, 'Gbk');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('disable restore keeps uncommitted edits in the original encoding', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { restoreOriginalStale } = require('../src/bootstrap');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-keep-edit-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+    return String(r.stdout || '');
+  };
+  git(['init', '-q']);
+  git(['config', 'user.email', 'a@b.c']);
+  git(['config', 'user.name', 't']);
+  git(['config', 'core.autocrlf', 'false']);
+  const original = '// \u4e2d\u6587\n';
+  const edited = '// \u4e2d\u6587\nint y;\n';
+  fs.writeFileSync(path.join(dir, 'a.c'), encodeCp936(original));
+  git(['add', 'a.c']);
+  git(['commit', '-q', '-m', 'init']);
+  fs.mkdirSync(path.join(dir, '.zkz', 'run'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.zkz', 'run', '.workspace_source_encodings.json'), JSON.stringify({
+    files: { 'a.c': 'Gbk' }
+  }), 'utf8');
+  fs.writeFileSync(path.join(dir, 'a.c'), Buffer.from(edited, 'utf8'));
+  const r = restoreOriginalStale(dir);
+  assert.strictEqual(r.leftover.length, 0);
+  assert.ok(fs.readFileSync(path.join(dir, 'a.c')).equals(encodeCp936(edited)));
+  assert.ok(git(['status', '--porcelain', '--', 'a.c']).indexOf('a.c') >= 0);
+  assert.strictEqual(git(['diff', '--cached', '--numstat', '--', 'a.c']).trim(), '');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('full keil sync copies root sources and skips gitignored files', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { syncKeilTree } = require('../src/keil_tree');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-root-sync-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: dir, windowsHide: true });
+    assert.strictEqual(r.status, 0, String(r.stderr));
+  };
+  git(['init', '-q']);
+  git(['config', 'user.email', 'a@b.c']);
+  git(['config', 'user.name', 't']);
+  git(['config', 'core.autocrlf', 'false']);
+  fs.mkdirSync(path.join(dir, '.git', 'info'), { recursive: true });
+  fs.appendFileSync(path.join(dir, '.git', 'info', 'exclude'), '\n.zkz/\nUser/secret.c\n');
+  fs.mkdirSync(path.join(dir, 'User'));
+  fs.writeFileSync(path.join(dir, 'root.c'), 'int root;\n');
+  fs.writeFileSync(path.join(dir, 'User', 'a.c'), 'int a;\n');
+  git(['add', 'root.c', 'User/a.c']);
+  git(['commit', '-q', '-m', 'init']);
+  fs.writeFileSync(path.join(dir, 'User', 'secret.c'), 'int secret;\n');
+  syncKeilTree(dir);
+  const kn = path.join(dir, '.zkz', 'keil-native');
+  assert.strictEqual(fs.readFileSync(path.join(kn, 'root.c'), 'utf8'), 'int root;\n');
+  assert.strictEqual(fs.readFileSync(path.join(kn, 'User', 'a.c'), 'utf8'), 'int a;\n');
+  assert.strictEqual(fs.existsSync(path.join(kn, 'User', 'secret.c')), false);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('library warning for one file does not erase another', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { inspectLibEncoding, loadLibWarnings } = require('../src/lib_encoding');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-lib-merge-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: dir, windowsHide: true });
+    assert.strictEqual(r.status, 0, String(r.stderr));
+  };
+  git(['init', '-q']);
+  git(['config', 'user.email', 'a@b.c']);
+  git(['config', 'user.name', 't']);
+  fs.mkdirSync(path.join(dir, 'Libraries'));
+  const gbk = encodeCp936('// \u4e2d\u6587\n');
+  fs.writeFileSync(path.join(dir, 'Libraries', 'a.c'), gbk);
+  fs.writeFileSync(path.join(dir, 'Libraries', 'b.c'), gbk);
+  git(['add', '.']);
+  git(['commit', '-q', '-m', 'init']);
+  fs.writeFileSync(path.join(dir, 'Libraries', 'a.c'), '// \u4e2d\u6587\n', 'utf8');
+  inspectLibEncoding(dir, ['Libraries/a.c'], { mode: 'worktree', persist: true });
+  inspectLibEncoding(dir, ['Libraries/b.c'], { mode: 'worktree', persist: true });
+  const left = loadLibWarnings(dir);
+  assert.strictEqual(left.length, 1);
+  assert.strictEqual(left[0].rel, 'Libraries/a.c');
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 runAsync();

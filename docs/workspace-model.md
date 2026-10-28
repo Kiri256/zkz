@@ -26,5 +26,5 @@
 
 - `zkz-code` 打开 `.c/.cpp` 时只应用已有宏表，不会每次重新解析。
 - `zkz-keil` 在真源+native 下编编烧树，并写 `substitute-path`。
-- `zkz-keil.prepareCortexDebug` 优先 `zkz-native.copyDebugAxf`，否则本包拷真源 axf。
+- 「调试」启动前把真源 axf 拷到 `.zkz/output.axf`，并写 `substitute-path`。
 - 打包脚本按白名单拷各包 `src/`；新增源码文件后必须同步更新对应 `package_zkz_*.py`。

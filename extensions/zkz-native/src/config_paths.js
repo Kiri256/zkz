@@ -8,12 +8,6 @@ const DEFAULT_PATHS = {
   paths: settings.DEFAULTS.native.paths.slice()
 };
 
-const ALWAYS_FORBID = [
-  '.zkz/config_paths.json',
-  '.zkz/settings.json',
-  '.zkz/run/.workspace_source_encodings.json'
-];
-
 function uniqRels(lists) {
   const seen = new Set();
   const out = [];
@@ -72,8 +66,7 @@ function loadConfigPaths(repoRoot) {
   return {
     paths: paths,
     skipWorktree: local,
-    overlay: local,
-    forbidStage: ALWAYS_FORBID.slice()
+    overlay: local
   };
 }
 
@@ -86,24 +79,8 @@ function saveConfigPaths(repoRoot, obj) {
   } catch (_) { /* ignore */ }
 }
 
-function matchesPrefix(rel, prefixes) {
-  const p = slashRel(rel);
-  for (const raw of prefixes) {
-    const pre = slashRel(raw);
-    if (p === pre || p.indexOf(pre.replace(/\/?$/, '/')) === 0) return true;
-  }
-  return false;
-}
-
-function isForbiddenStage(repoRoot, rel, cfg) {
-  const c = cfg || loadConfigPaths(repoRoot);
-  return matchesPrefix(rel, c.forbidStage);
-}
-
 module.exports = {
   DEFAULT_PATHS,
   loadConfigPaths,
-  saveConfigPaths,
-  isForbiddenStage,
-  matchesPrefix
+  saveConfigPaths
 };

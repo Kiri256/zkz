@@ -5,14 +5,35 @@ const vscode = require('vscode');
 const { folderForRoot } = require('../../shared/project_root');
 
 const ACTIONS = [
-  { action: 'build', name: 'Keil Build', group: 'build' },
-  { action: 'rebuild', name: 'Keil Rebuild', group: 'build' },
-  { action: 'flash', name: 'J-Link Flash', group: 'test' },
-  { action: 'prepare', name: 'Prepare Cortex Debug', group: '' },
-  { action: 'buildFlash', name: 'Build + Flash', group: 'build' },
-  { action: 'buildFlashPrepare', name: 'Build + Flash + Prepare Debug', group: '' },
-  { action: 'flashPrepare', name: 'Flash + Prepare Debug', group: '' }
+  { action: 'build', name: 'Keil Build', group: 'build', title: '编译', listed: true },
+  { action: 'rebuild', name: 'Keil Rebuild', title: '重新编译', listed: false },
+  { action: 'flash', name: 'J-Link Flash', title: '烧录', listed: false },
+  { action: 'prepare', name: 'Prepare Cortex Debug', title: '准备调试', listed: true },
+  { action: 'buildFlashPrepare', name: 'Build + Flash + Prepare Debug', title: '编译、烧录并准备调试', listed: true }
 ];
+
+function taskTitle(action) {
+  for (let i = 0; i < ACTIONS.length; i++) {
+    if (ACTIONS[i].action === action) return ACTIONS[i].title;
+  }
+  return action;
+}
+
+function taskChecksBuild(action) {
+  return action === 'build' || action === 'rebuild' || action === 'buildFlashPrepare';
+}
+
+/** 把任务失败写进终端。扩展宿主线程调用。 */
+function reportTaskError(emit, err) {
+  emit(String(err && err.message ? err.message : err));
+}
+
+function specFor(action) {
+  for (let i = 0; i < ACTIONS.length; i++) {
+    if (ACTIONS[i].action === action) return ACTIONS[i];
+  }
+  return null;
+}
 
 class KeilPty {
   constructor(action) {
@@ -29,12 +50,22 @@ class KeilPty {
       const s = normalizeEmitText(msg).replace(/\n/g, '\r\n');
       this._write.fire(s + '\r\n');
     };
-    Promise.resolve(runKeilAction(this.action, { log: emit, token: this._cancel.token }))
-      .then((code) => this._close.fire(code ? 1 : 0))
-      .catch((e) => {
-        emit(String(e && e.message ? e.message : e));
-        this._close.fire(1);
-      });
+    vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: taskTitle(this.action), cancellable: true },
+      (progress, uiToken) => {
+        const sub = uiToken.onCancellationRequested(() => this._cancel.cancel());
+        return Promise.resolve(runKeilAction(this.action, {
+          log: emit,
+          token: this._cancel.token,
+          progress: progress
+        })).finally(() => sub.dispose());
+      }
+    ).then((code) => {
+      this._close.fire(code ? 1 : 0);
+    }).catch((e) => {
+      reportTaskError(emit, e);
+      this._close.fire(1);
+    });
   }
   close() {
     this._cancel.cancel();
@@ -46,15 +77,14 @@ function makeTask(folder, spec) {
   const exec = new vscode.CustomExecution(async () => new KeilPty(spec.action));
   const scope = folder || vscode.TaskScope.Workspace;
   const task = new vscode.Task(def, scope, spec.name, 'zkz-keil', exec);
-  if (spec.group === 'build') task.group = vscode.TaskGroup.Build;
-  else if (spec.group === 'test') task.group = vscode.TaskGroup.Test;
+  if (spec.group === 'build') task.group = { id: 'build', isDefault: true };
   task.presentationOptions = {
     reveal: vscode.TaskRevealKind.Always,
     panel: vscode.TaskPanelKind.Dedicated,
     showReuseMessage: false,
     clear: true
   };
-  task.problemMatchers = ['$msCompile'];
+  task.problemMatchers = taskChecksBuild(spec.action) ? ['$zkz-keil'] : [];
   return task;
 }
 
@@ -76,13 +106,12 @@ function activate(context) {
     provideTasks() {
       const folder = taskFolder();
       if (!folder) return [];
-      return ACTIONS.map((spec) => makeTask(folder, spec));
+      return ACTIONS.filter((spec) => spec.listed).map((spec) => makeTask(folder, spec));
     },
     resolveTask(task) {
       const action = task && task.definition && task.definition.action;
-      if (!action) return undefined;
-      const spec = ACTIONS.filter((a) => a.action === action)[0]
-        || { action: action, name: task.name || action, group: '' };
+      const spec = specFor(action);
+      if (!spec) return undefined;
       const folder = taskFolder();
       if (!folder) return undefined;
       return makeTask(folder, spec);
@@ -91,4 +120,13 @@ function activate(context) {
   context.subscriptions.push(vscode.tasks.registerTaskProvider('zkz-keil', provider));
 }
 
-module.exports = { activate };
+/** 跑一条 Keil 任务。日志在任务终端，通知由任务打开。扩展宿主线程调用。 */
+async function runTask(action) {
+  const folder = taskFolder();
+  if (!folder) throw new Error('未打开工作区文件夹');
+  const spec = specFor(action);
+  if (!spec) throw new Error('未知的 Keil 动作：' + action);
+  await vscode.tasks.executeTask(makeTask(folder, spec));
+}
+
+module.exports = { activate, runTask };

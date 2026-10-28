@@ -2,8 +2,8 @@
 
 const vscode = require('vscode');
 
-// 左侧状态栏，数字越大越靠左：code 10、clangd 9、native 8、keil 7。
-const PRIORITY = 7;
+// 左侧状态栏，数字越大越靠左。clangd 扩展自己是 10，后面依次 code 9、keil 8、native 7。
+const PRIORITY = 8;
 
 const MENU = [
   { label: '编译', command: 'zkz-keil.keilBuild' },

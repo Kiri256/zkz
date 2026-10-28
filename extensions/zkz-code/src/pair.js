@@ -1,7 +1,7 @@
 'use strict';
 
 const vscode = require('vscode');
-const { isProjectRoot, findProjectRoot } = require('../../shared/project_root');
+const { findProjectRoot } = require('../../shared/project_root');
 
 function activeEditorPath() {
   try {
@@ -21,4 +21,4 @@ function resolvePair(filePath) {
   return { root: root };
 }
 
-module.exports = { isProjectRoot, resolvePair };
+module.exports = { resolvePair };

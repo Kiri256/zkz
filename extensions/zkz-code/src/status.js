@@ -6,49 +6,44 @@ const fs = require('fs');
 const { showInfoAuto, withProgress, log } = require('./util');
 const { resolvePair } = require('./pair');
 const { refreshCompileCommands: refreshCompileCommandsFile, resolveKeilLayout } = require('./compile_commands');
-const { isCompileCommandsStale, gitHead, readHeadOid } = require('./cc_stamp');
+const { readHeadName, isCompileCommandsBranchStale } = require('./cc_stamp');
 const { startHeadWatch } = require('./head_watch');
 const {
   findYtVersion,
+  isYtVersionPath,
   resolveMacroRoot,
   loadMacroTable,
   invalidateMacroTable,
   revealMacroInYtVersion,
   isTrackedMacro,
-  isMacroKeyShown,
-  machineFingerprint,
   formatMacroLines,
   listedMacroNames,
-  formatMacroBadge,
-  retainIndexSnapshot
+  formatMacroBadge
 } = require('./macros');
-const { diffMacroValues, invalidateIndexForMacroChanges } = require('./macro_impact');
+const { diffMacroValues, clearClangdIndex, restartClangdSoft } = require('./macro_impact');
 const ifdefFold = require('./ifdef_fold');
-const fffd = require('./fffd');
 const statusBar = require('./status_bar');
 
 const PREFIX = 'zkz-code';
 
 /** @type {Record<string, string>} 上次看到的宏表。保存和刷徽章会推进。 */
 let gLastMacros = {};
-/** @type {Record<string, string>} 上次成功刷过 clangd 索引时的宏表。 */
-let gIndexedMacros = {};
-let gLastMachineFp = '';
-let gYtPromptKey = '';
-let gYtPromptAt = 0;
+/** 连续保存合并成一次 clangd 重启。 */
+let gClangdRestartTimer = null;
+const CLANGD_RESTART_DEBOUNCE_MS = 1000;
 let gRefreshTimer = null;
 let gRefreshInFlight = false;
 let gRefreshQueued = false;
 let gYtWatchSuppressUntil = 0;
 let gYtWatchSuppressPath = '';
-let gMacroBaselineFrozen = false;
-let gMacroBaselineFreezeTimer = null;
+let gHeadSync = false;
 let bar = null;
 let gLastHeadHandled = '';
 let gLastHeadAt = 0;
-let gCcPromptedHead = '';
+let gCcPromptedBranch = '';
 let gCcRefreshInFlight = false;
 let gCcRefreshQueued = false;
+let gCcRefreshQueuedBranch = false;
 
 function command(name) {
   return PREFIX + '.' + name;
@@ -69,41 +64,18 @@ function isYtVersionWatchSuppressed(filePath) {
   return p === gYtWatchSuppressPath || /[\\/]yt_version\.h$/i.test(p);
 }
 
-function beginYtMacroCheckoutGuard(ms) {
-  const hold = typeof ms === 'number' && ms > 0 ? ms : 120000;
-  gMacroBaselineFrozen = true;
-  suppressYtVersionWatch('', hold);
-  if (gMacroBaselineFreezeTimer) clearTimeout(gMacroBaselineFreezeTimer);
-  gMacroBaselineFreezeTimer = setTimeout(() => {
-    gMacroBaselineFreezeTimer = null;
-    gMacroBaselineFrozen = false;
-  }, hold);
-}
-
-function endYtMacroCheckoutGuard() {
-  if (gMacroBaselineFreezeTimer) {
-    clearTimeout(gMacroBaselineFreezeTimer);
-    gMacroBaselineFreezeTimer = null;
-  }
-  gMacroBaselineFrozen = false;
-  suppressYtVersionWatch('', 2000);
-}
-
-function workspaceRoot() {
-  try { return resolvePair().root; } catch (_) { return ''; }
-}
-
-function sourceRoot() {
-  try { return resolvePair().root; } catch (_) { return workspaceRoot(); }
+function projectRoot(filePath) {
+  try { return resolvePair(filePath || '').root; } catch (_) { return ''; }
 }
 
 function findWorkspaceYtVersion() {
-  const root = workspaceRoot();
-  return findYtVersion(root) || findYtVersion(sourceRoot());
+  return findYtVersion(projectRoot());
 }
 
-function clangdRoot() {
-  return workspaceRoot() || sourceRoot();
+function isWorkspaceYtVersion(fsPath) {
+  const want = findWorkspaceYtVersion();
+  if (!want || !fsPath) return false;
+  return path.resolve(want).toLowerCase() === path.resolve(fsPath).toLowerCase();
 }
 
 function shouldTrackCc(root) {
@@ -119,34 +91,37 @@ function shouldTrackCc(root) {
 
 function refreshCcBadge() {
   if (!bar || !bar.alive()) return;
-  const root = clangdRoot() || sourceRoot();
+  const root = projectRoot();
   if (!shouldTrackCc(root)) {
     bar.setCc(false, false);
     return;
   }
-  bar.setCc(true, isCompileCommandsStale(root));
+  bar.setCc(true, isCompileCommandsBranchStale(root));
 }
 
-function maybePromptCcFail(root, head, err) {
-  if (head && gCcPromptedHead === head) return;
-  if (head) gCcPromptedHead = head;
+function maybePromptCcFail(branch, err) {
+  if (branch && gCcPromptedBranch === branch) return;
+  if (branch) gCcPromptedBranch = branch;
   const msg = String(err && err.message ? err.message : err);
   void vscode.window.showWarningMessage(
-    'compile_commands \u81ea\u52a8\u5237\u65b0\u5931\u8d25: ' + msg,
-    '\u91cd\u8bd5'
+    'compile_commands 自动刷新失败: ' + msg,
+    '重试'
   ).then((choice) => {
-    if (choice === '\u91cd\u8bd5') void refreshCompileCommands();
+    if (choice === '重试') void refreshCompileCommands();
   });
 }
 
-async function autoRefreshCc(root, head, opts) {
+async function autoRefreshCc(root, branch, opts) {
   if (!shouldTrackCc(root)) return;
-  if (!isCompileCommandsStale(root, head)) {
+  const missing = !fs.existsSync(path.join(root, 'compile_commands.json'));
+  const onBranch = !!(opts && opts.branch);
+  if (!missing && !onBranch) {
     refreshCcBadge();
     return;
   }
   if (gCcRefreshInFlight) {
     gCcRefreshQueued = true;
+    if (onBranch) gCcRefreshQueuedBranch = true;
     return;
   }
   gCcRefreshInFlight = true;
@@ -162,111 +137,74 @@ async function autoRefreshCc(root, head, opts) {
     } else {
       await run();
     }
+    gCcPromptedBranch = '';
   } catch (e) {
     log('compile_commands auto refresh failed: ' + String(e && e.message ? e.message : e));
-    maybePromptCcFail(root, head, e);
+    maybePromptCcFail(branch, e);
   } finally {
     gCcRefreshInFlight = false;
     refreshCcBadge();
     if (gCcRefreshQueued) {
+      const branch = gCcRefreshQueuedBranch;
       gCcRefreshQueued = false;
-      const nextRoot = clangdRoot() || sourceRoot() || root;
-      void autoRefreshCc(nextRoot, gitHead(nextRoot), opts);
+      gCcRefreshQueuedBranch = false;
+      const nextRoot = projectRoot() || root;
+      const nextOpts = branch ? { notify: true, branch: true } : opts;
+      void autoRefreshCc(nextRoot, readHeadName(nextRoot), nextOpts);
     }
   }
 }
 
 async function onHeadChanged(payload) {
-  const root = (payload && payload.root) || clangdRoot() || sourceRoot();
-  const to = (payload && payload.to) ? String(payload.to) : gitHead(root);
+  const root = (payload && payload.root) || projectRoot();
+  const to = (payload && payload.to) ? String(payload.to) : readHeadName(root);
   if (!to) return;
   const now = Date.now();
   if (to === gLastHeadHandled && (now - gLastHeadAt) < 2000) return;
   gLastHeadHandled = to;
   gLastHeadAt = now;
 
-  beginYtMacroCheckoutGuard(120000);
+  gHeadSync = true;
+  suppressYtVersionWatch('', 5000);
   try {
     await syncYtMacros({ reason: 'checkout', prompt: true });
   } finally {
-    endYtMacroCheckoutGuard();
+    gHeadSync = false;
+    suppressYtVersionWatch('', 2000);
     refreshStatus();
   }
-  void autoRefreshCc(root, to, { notify: true });
+  void autoRefreshCc(root, to, { notify: true, branch: true });
 }
 
 function adoptSeenMacros(macros) {
-  gIndexedMacros = retainIndexSnapshot(gIndexedMacros, gLastMacros, macros);
-  gLastMacros = macros;
-  gLastMachineFp = machineFingerprint(macros);
-}
-
-function commitIndexSnapshot(macros) {
-  gIndexedMacros = macros || {};
-  gLastMacros = macros || gLastMacros;
-  gLastMachineFp = machineFingerprint(gLastMacros);
-}
-
-function changedSinceIndex(macros) {
-  if (Object.keys(gIndexedMacros).length) {
-    return diffMacroValues(gIndexedMacros, macros).filter((k) => isTrackedMacro(k));
-  }
-  return Object.keys(macros).filter((k) => isTrackedMacro(k) && isMacroKeyShown(k, macros[k]));
+  gLastMacros = macros || {};
 }
 
 function alignYtMacroBaseline(macros) {
-  if (gMacroBaselineFrozen) return false;
+  if (gHeadSync) return false;
   if (!macros || typeof macros !== 'object') return false;
-  const fp = machineFingerprint(macros);
   const changed = Object.keys(gLastMacros).length
     ? diffMacroValues(gLastMacros, macros)
     : Object.keys(macros);
-  if (!Object.keys(gLastMacros).length || changed.length || fp !== gLastMachineFp) {
+  if (!Object.keys(gLastMacros).length || changed.length) {
     adoptSeenMacros(macros);
     return true;
   }
   return false;
 }
 
-async function reindexClangd() {
-  const root = clangdRoot();
-  if (!root) throw new Error('Open a workspace first');
-  const indexDir = path.join(root, '.cache', 'clangd');
-  await withProgress('Reindex clangd', async () => {
-    if (fs.existsSync(indexDir)) {
-      fs.rmSync(indexDir, { recursive: true, force: true });
-    }
-    for (const cmd of ['clangd.restart', 'clangd.restartLanguageServer']) {
-      try { await vscode.commands.executeCommand(cmd); break; } catch (_) { /* next */ }
-    }
-  });
-  log('clangd index cleared: ' + indexDir);
-  void showInfoAuto('clangd index cleared: ' + indexDir);
-}
-
-async function restartClangd() {
-  let restarted = false;
-  await withProgress('Restart clangd', async () => {
-    for (const cmd of ['clangd.restart', 'clangd.restartLanguageServer']) {
-      try {
-        await vscode.commands.executeCommand(cmd);
-        restarted = true;
-        break;
-      } catch (_) { /* try next */ }
-    }
-  });
-  if (!restarted) throw new Error('clangd restart command unavailable');
-  log('clangd restarted');
-  void showInfoAuto('clangd restarted');
-}
-
 async function refreshCompileCommands() {
-  const root = sourceRoot() || workspaceRoot();
+  const root = projectRoot();
   if (!root) throw new Error('Open a workspace first');
-  await withProgress('Refresh compile_commands', () =>
-    refreshCompileCommandsFile(root, { force: true, log })
-  );
-  gCcPromptedHead = gitHead(root) || gCcPromptedHead;
+  try {
+    await withProgress('Refresh compile_commands', () =>
+      refreshCompileCommandsFile(root, { force: true, log })
+    );
+    gCcPromptedBranch = '';
+  } catch (e) {
+    refreshCcBadge();
+    throw e;
+  }
   refreshCcBadge();
   void showInfoAuto('compile_commands refreshed (restart clangd if needed)');
 }
@@ -291,58 +229,40 @@ async function syncYtMacros(opts) {
     return { changed: [], updated: false };
   }
 
-  const fp = machineFingerprint(macros);
   const changedAll = Object.keys(gLastMacros).length ? diffMacroValues(gLastMacros, macros) : [];
-  // 弹窗/刷索引只看白名单；折叠用全量，非白名单变了也要重折
+  // 重启只看白名单；折叠用全量，非白名单变了也要重折
   const changed = changedAll.filter((k) => isTrackedMacro(k));
-  if (gMacroBaselineFrozen && reason !== 'checkout' && reason !== 'save') {
-    return { changed: changed, updated: false, frozen: true };
+  if (gHeadSync && reason !== 'checkout' && reason !== 'save') {
+    return { changed: changed, updated: false };
   }
-  const prevFp = gLastMachineFp;
   adoptSeenMacros(macros);
 
   if (changedAll.length) {
     try { ifdefFold.onMacrosChanged(); } catch (_) { /* ignore */ }
   }
 
-  if (!prompt || !changed.length) {
-    return { changed: changed, updated: true };
-  }
-
-  const dedupKey = fp + '|' + changed.slice().sort().join(',');
-  const now = Date.now();
-  if (dedupKey === gYtPromptKey && (now - gYtPromptAt) < 120000) {
-    return { changed: changed, updated: true, deduped: true };
-  }
-  gYtPromptKey = dedupKey;
-  gYtPromptAt = now;
-
-  const preview = changed.slice(0, 8).join(', ') + (changed.length > 8 ? '...' : '');
-  const machineHint = (prevFp && fp !== prevFp) ? '\u673a\u578b\u6307\u7eb9\u4e5f\u53d8\u4e86\u3002' : '';
-  let reasonHint = '\u5b8f';
-  if (reason === 'checkout') reasonHint = '\u5206\u652f\u5207\u6362\u540e';
-  else if (reason === 'disk') reasonHint = '\u78c1\u76d8\u6587\u4ef6\u53d8\u66f4\u540e';
-  const choice = await vscode.window.showInformationMessage(
-    reasonHint + '\u5df2\u53d8\u5316 ' + changed.length + '\u9879: ' + preview + '\u3002' + machineHint +
-    '\u53ef\u6309\u5f15\u7528\u6587\u4ef6\u5220\u9664\u5bf9\u5e94 clangd .idx\uff08\u4e0d\u662f\u5168\u91cf\u6e05\u7d22\u5f15\uff09\u3002',
-    '\u5c40\u90e8\u5237\u65b0\u7d22\u5f15',
-    '\u5168\u91cf\u91cd\u5efa\u7d22\u5f15',
-    '\u7a0d\u540e'
-  );
-  if (choice === '\u5c40\u90e8\u5237\u65b0\u7d22\u5f15') {
-    const r = await invalidateIndexForMacroChanges(macroRoot, changed);
-    commitIndexSnapshot(macros);
-    const searchN = (r.searchMacros && r.searchMacros.length) ? r.searchMacros.length : changed.length;
-    void showInfoAuto(
-      '\u5df2\u5220 ' + r.removed + ' \u4e2a .idx\uff08\u79cd\u5b50 ' + changed.length +
-      ' / \u68c0\u7d22 ' + searchN + ' \u5b8f, \u547d\u4e2d ' + r.files.length +
-      ' \u4e2a\u6587\u4ef6\uff09' + (r.restarted ? '\uff0c\u5df2\u8bf7\u6c42 clangd \u91cd\u542f' : '')
-    );
-  } else if (choice === '\u5168\u91cf\u91cd\u5efa\u7d22\u5f15') {
-    await reindexClangd();
-    commitIndexSnapshot(macros);
-  }
+  if (prompt && changed.length) scheduleClangdRestart();
   return { changed: changed, updated: true };
+}
+
+function scheduleClangdRestart() {
+  if (gClangdRestartTimer) clearTimeout(gClangdRestartTimer);
+  gClangdRestartTimer = setTimeout(() => {
+    gClangdRestartTimer = null;
+    void restartClangdSoft().then((ok) => {
+      if (!ok) log('clangd restart failed');
+    });
+  }, CLANGD_RESTART_DEBOUNCE_MS);
+}
+
+async function restartClangd() {
+  if (gClangdRestartTimer) {
+    clearTimeout(gClangdRestartTimer);
+    gClangdRestartTimer = null;
+  }
+  const ok = await restartClangdSoft();
+  if (!ok) throw new Error('未能重启 clangd');
+  void showInfoAuto('已请求 clangd 重启');
 }
 
 function refreshStatus() {
@@ -431,62 +351,17 @@ async function openMacroPick(pick) {
   await revealMacroInYtVersion(pick.filePath, pick.line);
 }
 
-async function showMacros() {
-  const ver = findWorkspaceYtVersion();
-  if (!ver) throw new Error('yt_version.h not found');
-  const detailed = loadMacroTable({ workspaceRoot: resolveMacroRoot(ver), filePath: ver });
-  const macros = detailed.macros;
-  const locs = detailed.locs || {};
-  const names = listedMacroNames(macros);
-  if (!names.length) {
-    void showInfoAuto('\u65e0\u5df2\u542f\u7528\u5b8f\uff08\u6216\u4ec5\u6709 =0\uff09');
-    return;
-  }
-  const items = [
-    { label: '$(file) \u6253\u5f00 yt_version.h', description: ver, id: 'open' },
-    ...names.map((k) => {
-      const v = macros[k];
-      return {
-        label: (v === '' || v == null) ? ('#define ' + k) : (k + '=' + v),
-        description: locs[k] ? ('L' + locs[k]) : '',
-        id: 'macro',
-        name: k,
-        line: locs[k] || 0
-      };
-    })
-  ];
-  const pick = await vscode.window.showQuickPick(items, {
-    placeHolder: '\u9009\u62e9\u5b8f\u4ee5\u8df3\u8f6c\u5230\u5b9a\u4e49 \u2014 ' + path.basename(ver),
-    matchOnDescription: true
-  });
-  if (!pick) return;
-  if (pick.id === 'open') {
-    await revealMacroInYtVersion(ver, 1);
-    return;
-  }
-  if (!pick.line) {
-    vscode.window.showWarningMessage('\u672a\u627e\u5230\u5b9a\u4e49\u884c: ' + pick.name);
-    return;
-  }
-  await revealMacroInYtVersion(ver, pick.line);
+async function invalidateMacroImpact() {
+  const root = projectRoot();
+  if (!root) throw new Error('Open a workspace first');
+  const r = await clearClangdIndex(root);
+  void showInfoAuto(formatClearResult(r));
 }
 
-async function invalidateMacroImpact() {
-  const ver = findWorkspaceYtVersion();
-  if (!ver) throw new Error('yt_version.h not found');
-  const macros = loadMacroTable({ workspaceRoot: resolveMacroRoot(ver), filePath: ver }).macros;
-  const changed = changedSinceIndex(macros);
-  if (!changed.length) {
-    void showInfoAuto('\u65e0\u5b8f\u53d8\u5316\u53ef\u7528\uff08\u76f8\u5bf9\u4e0a\u6b21\u5237\u8fc7\u7684\u7d22\u5f15\uff09');
-    return;
-  }
-  const r = await invalidateIndexForMacroChanges(resolveMacroRoot(ver), changed);
-  commitIndexSnapshot(macros);
-  const searchN = (r.searchMacros && r.searchMacros.length) ? r.searchMacros.length : changed.length;
-  void showInfoAuto(
-    '\u5b8f ' + changed.length + '\u9879(\u68c0\u7d22 ' + searchN + ') \u2192 \u6587\u4ef6 ' + r.files.length +
-    ' \u2192 \u5220 .idx ' + r.removed + (r.restarted ? ' + clangd restart' : '')
-  );
+function formatClearResult(r) {
+  const tail = r && r.restarted ? '，已请求 clangd 重启' : '';
+  if (r && r.wiped) return '已清空 clangd index 目录（' + r.removed + ' 项）' + tail;
+  return 'clangd index 目录未删净（已删 ' + ((r && r.removed) || 0) + ' 项）' + tail;
 }
 
 function activate(context) {
@@ -501,47 +376,24 @@ function activate(context) {
   });
 
   context.subscriptions.push(
-    vscode.commands.registerCommand(command('showMacros'), wrap(showMacros)),
     vscode.commands.registerCommand(command('invalidateMacroImpactIndex'), wrap(invalidateMacroImpact)),
-    vscode.commands.registerCommand(command('refreshCompileCommands'), wrap(refreshCompileCommands)),
-    vscode.commands.registerCommand(command('reindexClangd'), wrap(reindexClangd)),
     vscode.commands.registerCommand(command('restartClangd'), wrap(restartClangd)),
-    vscode.commands.registerCommand(command('refreshStatus'), wrap(async () => refreshStatus())),
-    vscode.commands.registerCommand(command('beginYtMacroCheckoutGuard'), wrap(async () => {
-      beginYtMacroCheckoutGuard(120000);
-    })),
-    vscode.commands.registerCommand(command('syncYtVersionAfterCheckout'), wrap(async () => {
-      if (!gMacroBaselineFrozen) suppressYtVersionWatch('', 2000);
-      try {
-        await syncYtMacros({ reason: 'checkout', prompt: true });
-      } finally {
-        endYtMacroCheckoutGuard();
-        refreshStatus();
-      }
-    })),
-    vscode.commands.registerCommand(command('onHeadChanged'), wrap(async (payload) => {
-      await onHeadChanged(payload || {});
-    }))
+    vscode.commands.registerCommand(command('refreshCompileCommands'), wrap(refreshCompileCommands))
   );
-
-  fffd.activate(context, {
-    command: command,
-    workspaceRoot: workspaceRoot,
-    resolveRoot: sourceRoot,
-    showInfoAuto: showInfoAuto
-  });
 
   let ytDiskDebounce = null;
   const onYtVersionSaved = async (doc) => {
     if (!doc || doc.uri.scheme !== 'file') return;
-    if (!/yt_version\.h$/i.test(doc.uri.fsPath)) return;
+    if (!isWorkspaceYtVersion(doc.uri.fsPath)) return;
     suppressYtVersionWatch(doc.uri.fsPath, 1500);
-    try { await syncYtMacros({ reason: 'save', text: doc.getText(), prompt: true }); } catch (_) { /* ignore */ }
+    try {
+      await syncYtMacros({ reason: 'save', text: doc.getText(), filePath: doc.uri.fsPath, prompt: true });
+    } catch (_) { /* ignore */ }
     refreshStatus();
   };
   const ytWatcher = vscode.workspace.createFileSystemWatcher('**/yt_version.h');
   const onYtDiskChanged = (uri) => {
-    if (!uri || uri.scheme !== 'file') return;
+    if (!uri || uri.scheme !== 'file' || !isWorkspaceYtVersion(uri.fsPath)) return;
     if (isYtVersionWatchSuppressed(uri.fsPath)) return;
     if (ytDiskDebounce) clearTimeout(ytDiskDebounce);
     ytDiskDebounce = setTimeout(() => {
@@ -549,6 +401,11 @@ function activate(context) {
       if (isYtVersionWatchSuppressed(uri.fsPath)) return;
       void syncYtMacros({ reason: 'disk', prompt: false, filePath: uri.fsPath }).then(() => refreshStatus());
     }, 400);
+  };
+  const onYtDiskDeleted = (uri) => {
+    if (!uri || uri.scheme !== 'file' || !isYtVersionPath(projectRoot(uri.fsPath), uri.fsPath)) return;
+    invalidateMacroTable();
+    void syncYtMacros({ reason: 'disk', prompt: false }).then(() => refreshStatus());
   };
 
   // .clangd -D 也是宏表输入；折叠不再自己解析，这里统一失效再刷
@@ -572,14 +429,19 @@ function activate(context) {
     headSub = null;
   };
   const bindHead = (filePath) => {
-    let next = '';
-    try { next = resolvePair(filePath || '').root; } catch (_) { next = clangdRoot() || sourceRoot(); }
+    const next = projectRoot(filePath);
     if (next === headRepo && headSub) return;
     stopHead();
     headRepo = next || '';
     if (!headRepo) return;
-    const head = readHeadOid(headRepo) || gitHead(headRepo);
-    if (head && isCompileCommandsStale(headRepo, head)) void autoRefreshCc(headRepo, head);
+    if (isCompileCommandsBranchStale(headRepo)) {
+      const hasFile = fs.existsSync(path.join(headRepo, 'compile_commands.json'));
+      void autoRefreshCc(
+        headRepo,
+        readHeadName(headRepo),
+        hasFile ? { branch: true, notify: true } : undefined
+      );
+    }
     headSub = startHeadWatch(null, headRepo, (payload) => onHeadChanged(payload));
   };
 
@@ -591,8 +453,7 @@ function activate(context) {
     vscode.window.onDidChangeActiveTextEditor((ed) => {
       const uri = ed && ed.document && ed.document.uri;
       if (!uri || uri.scheme !== 'file') return;
-      let next = '';
-      try { next = resolvePair(uri.fsPath).root; } catch (_) { next = clangdRoot() || sourceRoot(); }
+      const next = projectRoot(uri.fsPath);
       if (next === headRepo) return;
       bindHead(uri.fsPath);
       refreshStatus();
@@ -608,6 +469,7 @@ function activate(context) {
     ytWatcher,
     ytWatcher.onDidChange(onYtDiskChanged),
     ytWatcher.onDidCreate(onYtDiskChanged),
+    ytWatcher.onDidDelete(onYtDiskDeleted),
     clangdWatcher,
     clangdWatcher.onDidChange(onClangdChanged),
     clangdWatcher.onDidCreate(onClangdChanged),
@@ -617,8 +479,7 @@ function activate(context) {
         if (ytDiskDebounce) clearTimeout(ytDiskDebounce);
         if (clangdDebounce) clearTimeout(clangdDebounce);
         if (gRefreshTimer) clearTimeout(gRefreshTimer);
-        if (gMacroBaselineFreezeTimer) clearTimeout(gMacroBaselineFreezeTimer);
-        gMacroBaselineFrozen = false;
+        gHeadSync = false;
         stopHead();
         if (bar) bar.dispose();
         bar = null;
@@ -638,9 +499,5 @@ function deactivate() {
 
 module.exports = {
   activate,
-  deactivate,
-  refreshStatus,
-  findWorkspaceYtVersion,
-  beginYtMacroCheckoutGuard,
-  endYtMacroCheckoutGuard
+  deactivate
 };

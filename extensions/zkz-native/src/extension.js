@@ -3,7 +3,7 @@
 const vscode = require('vscode');
 const { isInstalled, verifyGitConfig } = require('./git_config');
 const { verifyHooks } = require('./hooks');
-const { restoreOverlay, overlaySeeded } = require('./overlay');
+const { restoreOverlay, overlayDrift } = require('./overlay');
 const { refresh, silentRefresh, tableDrift } = require('./bootstrap');
 const commands = require('./commands');
 const statusBar = require('./status_bar');
@@ -18,9 +18,8 @@ function tryRepo(filePath) {
 function headLabel(repo, to) {
   let branch = '';
   try { branch = currentBranch(repo); } catch (_) { branch = ''; }
-  const short = String(to || '').slice(0, 8);
-  if (branch && branch !== 'HEAD') return short ? branch + ' (' + short + ')' : branch;
-  return short || '新提交';
+  if (branch && branch !== 'HEAD') return branch;
+  return String(to || '').slice(0, 8) || '分离头';
 }
 
 function warnActivate(step, e) {
@@ -55,30 +54,32 @@ function activate(context) {
       try {
         const r = await vscode.window.withProgress({
           location: vscode.ProgressLocation.Notification,
-          title: 'zkz-native：已切换到 ' + where + '，正在刷新编码表',
+          title: '已切换到 ' + where + '，正在刷新编码表',
           cancellable: false
         }, () => withLock(repo, () => silentRefresh(repo, { from: from, to: to })));
-        if (r && r.errors && r.errors.length) warnActivate('headWatch', r.errors.join('; '));
+        if (r && r.errors && r.errors.length) warnActivate('刷新编码表', r.errors.join('; '));
       } catch (e) {
-        warnActivate('headWatch', e);
+        warnActivate('刷新编码表', e);
       }
       try { bar.refresh(); } catch (_) { /* ignore */ }
-      void vscode.window.showInformationMessage(
-        'zkz-native：已切换到 ' + where + '，是否从权威副本还原本地配置？',
-        '还原'
-      ).then((choice) => {
-        if (choice !== '还原') return;
-        if (!overlaySeeded(repo)) {
-          void vscode.window.showInformationMessage('还没有权威副本，请先执行 saveConfigOverlay');
-          return;
-        }
-        try {
-          const restored = restoreOverlay(repo);
-          void vscode.window.showInformationMessage('已还原 ' + restored.restored.length + ' 个本地配置');
-        } catch (e) {
-          warnActivate('configOverlay', e);
-        }
-      });
+      let drift = 'same';
+      try { drift = overlayDrift(repo); } catch (e) {
+        warnActivate('本地配置', e);
+        return;
+      }
+      if (drift !== 'changed') return;
+      const choice = await vscode.window.showInformationMessage(
+        '已切换到 ' + where + '。本地配置与权威副本不一致。',
+        '还原',
+        '跳过'
+      );
+      if (choice !== '还原') return;
+      try {
+        const restored = restoreOverlay(repo);
+        commands.note('已还原 ' + restored.restored.length + ' 个本地配置', 'native');
+      } catch (e) {
+        warnActivate('还原本地配置', e);
+      }
     });
   };
 
@@ -93,7 +94,9 @@ function activate(context) {
       if (verify) {
         try { verifyGitConfig(repo, extensionRoot); } catch (e) { warnActivate('verifyGitConfig', e); }
         try { verifyHooks(repo, extensionRoot); } catch (e) { warnActivate('verifyHooks', e); }
-        if (tableDrift(repo)) {
+        let drift = false;
+        try { drift = tableDrift(repo); } catch (e) { warnActivate('encodingTable', e); }
+        if (drift) {
           void withLock(repo, () => refresh(repo, extensionRoot))
             .then(() => bar.refresh())
             .catch((e) => warnActivate('refreshTable', e));
@@ -109,6 +112,7 @@ function activate(context) {
 
   commands.register(context, extensionRoot, {
     onStatus: () => bar.refresh(),
+    onFlash: (text) => bar.flash(text),
     onActive: (on) => {
       if (on) startWatch(tryRepo());
       else stopHeadWatch();

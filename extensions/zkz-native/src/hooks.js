@@ -14,10 +14,14 @@ function hookFile(repoRoot, name) {
 
 function nativeSnippet(extensionRoot, event) {
   const runner = scriptPath(extensionRoot, 'hook_runner.js');
-  const extra = 'exec ' + quoteSh(nodeBin()) + ' ' + quoteSh(runner) + ' ' + event + ' "$@"';
+  const extra = quoteSh(nodeBin()) + ' ' + quoteSh(runner) + ' ' + event + ' "$@"';
   return [
     '# zkz-native ' + event,
-    extra
+    extra,
+    '_zkz_native_status=$?',
+    'if [ "$_zkz_native_status" -ne 0 ]; then',
+    '  exit "$_zkz_native_status"',
+    'fi'
   ].join('\n');
 }
 

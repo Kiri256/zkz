@@ -1,104 +1,229 @@
 'use strict';
 
+const path = require('path');
 const vscode = require('vscode');
-const { statusSnapshot } = require('./bootstrap');
-const { formatStatus, resolveRepo } = require('./commands');
+const { statusSnapshot, barLabel, statusLines, encodingActions } = require('./bootstrap');
+const commands = require('./commands');
+const { resolveRepo } = commands;
 const { isInstalled } = require('./git_config');
 const { FILTER_FAIL_LIMIT, markFilterFailNotified } = require('./observe');
-const { markLibWarningsNotified } = require('./lib_encoding');
 
-const NATIVE_MENU = [
-  { label: '启用过滤器', command: 'zkz-native.enable' },
-  { label: '关闭过滤器', command: 'zkz-native.disable' },
-  { label: '刷新编码表', command: 'zkz-native.refreshTable' },
-  { label: '检查 cp936 往返', command: 'zkz-native.checkRoundtrip' },
-  { label: '查看状态', command: 'zkz-native.status' },
-  { label: '同步编烧树', command: 'zkz-native.syncKeilTree' },
-  { label: '拷贝调试 axf', command: 'zkz-native.copyDebugAxf' },
-  { label: '保存本地配置', command: 'zkz-native.saveConfigOverlay' },
-  { label: '还原本地配置', command: 'zkz-native.restoreConfigOverlay' },
-  { label: '预热追溯缓存', command: 'zkz-native.warmTextconv' }
-];
+// 左侧状态栏，数字越大越靠左。clangd 扩展自己是 10，后面依次 code 9、keil 8、native 7。
+const PRIORITY = 7;
+const FLASH_MS = 4000;
 
-// 左侧状态栏，数字越大越靠左：code 10、clangd 9、native 8、keil 7。
-const PRIORITY = 8;
+function sep(label) {
+  return { label: label, kind: vscode.QuickPickItemKind.Separator };
+}
+
+function hoverOf(st) {
+  return statusLines(st).concat(['点击打开菜单']).join('\n');
+}
+
+async function openAt(repo, rel, position) {
+  if (!repo || !rel) return;
+  const abs = path.join(repo, ...String(rel).split('/'));
+  const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(abs));
+  const editor = await vscode.window.showTextDocument(doc);
+  if (!Number.isFinite(position) || position < 0) return;
+  const pos = doc.positionAt(position);
+  editor.selection = new vscode.Selection(pos, pos);
+  editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+}
 
 function create(context, opts) {
   const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, PRIORITY);
   item.name = 'zkz Native';
   item.command = 'zkz-native.showCommandMenu';
   context.subscriptions.push(item);
-  context.subscriptions.push(vscode.commands.registerCommand('zkz-native.showCommandMenu', async () => {
-    const pick = await vscode.window.showQuickPick(NATIVE_MENU, {
-      title: 'zkz-native',
-      placeHolder: '选择要执行的命令'
-    });
-    if (!pick) return;
-    await vscode.commands.executeCommand(pick.command);
-  }));
+
+  let latest = null;
+  let flashText = '';
+  let flashTimer = null;
+  let watchRepo = '';
+  let watchSubs = [];
+  let watchBound = false;
 
   const refresh = () => {
     try {
       const repo = resolveRepo();
+      watchRun(repo);
       if (!isInstalled(repo)) {
-        item.text = '$(circle-slash) zkz-native: off';
-        item.tooltip = '过滤器未启用，点击选择命令';
-        item.backgroundColor = undefined;
+        const st = { installed: false, tableCount: 0 };
+        latest = { repo: repo, st: st, actions: encodingActions(st) };
+        if (!flashText) {
+          item.text = '$(circle-slash) ' + barLabel(st);
+          item.backgroundColor = undefined;
+        }
+        item.tooltip = '过滤器未启用\n点击打开菜单';
         item.show();
         return;
       }
       const st = statusSnapshot(repo);
-      item.text = '$(symbol-enum) ' + formatStatus(st);
-      const tips = ['zkz-native 过滤器与编码表'];
-      if (st.roundtripFails && st.roundtripFails.length) {
-        tips.push('往返失败: ' + st.roundtripFails.slice(0, 8).join(', '));
+      latest = { repo: repo, st: st, actions: encodingActions(st) };
+      if ((st.filterFails || 0) >= FILTER_FAIL_LIMIT && !st.filterFailNotified) {
+        markFilterFailNotified(repo);
+        void vscode.window.showWarningMessage('过滤器连续失败，Git 可能不可用。', '关闭过滤器').then((choice) => {
+          if (choice === '关闭过滤器') void vscode.commands.executeCommand('zkz-native.disable');
+        });
       }
-      if (st.cp936Drops && st.cp936Drops.length) {
-        tips.push('丢掉替换字符: ' + st.cp936Drops.slice(0, 8).join(', ') + '。见 .zkz/run/roundtrip-failures.json');
+      item.tooltip = hoverOf(st);
+      if (flashText) {
+        item.show();
+        return;
       }
-      if (st.tableDrift) tips.push('编码表对应的分支已变，将自动刷新或请执行 refreshTable');
-      const libItems = st.libWarnings || [];
-      if (libItems.length) {
-        tips.push('库编码告警: ' + libItems.slice(0, 8).map((it) => it.rel).join(', '));
-      }
-      if (st.filterFails >= FILTER_FAIL_LIMIT) {
-        tips.push('filter 连续失败。可运行 zkz-native.disable 卸过滤器（不依赖 filter 进程）');
-        item.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
-        if (!st.filterFailNotified) {
-          markFilterFailNotified(repo);
-          void vscode.window.showWarningMessage(
-            'zkz-native filter 连续失败 ' + st.filterFails + ' 次，git 可能不可用。可执行 zkz-native.disable'
-          );
-        }
-      } else if ((st.roundtripFails && st.roundtripFails.length) || (st.cp936Drops && st.cp936Drops.length) || st.tableDrift || libItems.length) {
-        item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-        if (libItems.length && !st.libWarningsNotified) {
-          markLibWarningsNotified(repo);
-          void vscode.window.showWarningMessage(
-            'zkz-native: ' + libItems.length + ' 个库文件编码疑似漂移或损坏。库不过滤，不会自动改回。见 .zkz/run/lib-encoding-warnings.json'
-          );
-        }
-      } else {
-        item.backgroundColor = undefined;
-      }
-      tips.push('点击选择命令');
-      item.tooltip = tips.join('\n');
+      item.text = '$(symbol-enum) ' + barLabel(st);
+      item.backgroundColor = undefined;
       item.show();
     } catch (_) {
-      item.hide();
+      if (!flashText) item.hide();
     }
   };
 
+  function watchRun(repo) {
+    if (!repo || watchRepo === repo) return;
+    watchRepo = repo;
+    watchSubs.forEach((d) => { try { d.dispose(); } catch (_) { /* ignore */ } });
+    watchSubs = [];
+    try {
+      const w = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(path.join(repo, '.zkz', 'run'), '*.json'));
+      const kick = () => refresh();
+      watchSubs.push(w, w.onDidChange(kick), w.onDidCreate(kick), w.onDidDelete(kick));
+    } catch (_) { /* ignore */ }
+    if (!watchBound) {
+      watchBound = true;
+      context.subscriptions.push({
+        dispose: () => {
+          watchSubs.forEach((d) => { try { d.dispose(); } catch (_) { /* ignore */ } });
+          watchSubs = [];
+        }
+      });
+    }
+  }
+
+  function flash(text) {
+    flashText = String(text || '');
+    item.text = '$(symbol-enum) ' + flashText;
+    item.backgroundColor = undefined;
+    item.show();
+    if (flashTimer) clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => {
+      flashText = '';
+      flashTimer = null;
+      refresh();
+    }, FLASH_MS);
+  }
+
+  async function showMenu() {
+    if (!latest) {
+      try { refresh(); } catch (_) { /* ignore */ }
+    }
+    const repo = latest && latest.repo;
+    const st = (latest && latest.st) || {};
+    const actions = (latest && latest.actions) || { restage: [], opens: [], notes: [], unstable: [] };
+    const items = [];
+    if ((st.filterFails || 0) >= FILTER_FAIL_LIMIT) {
+      items.push({ label: '关闭过滤器', command: 'zkz-native.disable', description: '过滤器连续失败，Git 可能不可用' });
+    }
+    if (actions.restage.length === 1) {
+      items.push({
+        label: '重新暂存 ' + actions.restage[0].rel,
+        action: 'restage',
+        rels: [actions.restage[0].rel],
+        description: actions.restage[0].message
+      });
+    } else if (actions.restage.length > 1) {
+      items.push({
+        label: '重新暂存 ' + actions.restage.length + ' 个文件',
+        action: 'restage',
+        rels: actions.restage.map((x) => x.rel),
+        description: actions.restage.map((x) => x.rel).slice(0, 8).join('、')
+      });
+    }
+    if (actions.opens.length === 1) {
+      const one = actions.opens[0];
+      items.push({
+        label: one.rel + '：这个字符写不回 GBK',
+        action: 'open',
+        rel: one.rel,
+        position: one.position,
+        description: one.message
+      });
+    } else if (actions.opens.length > 1) {
+      items.push({ label: actions.opens.length + ' 个文件编不回 GBK', action: 'list-open', files: actions.opens });
+    }
+    actions.notes.slice(0, 4).forEach((n) => {
+      items.push({ label: String(n.message || '').slice(0, 80), action: 'note', detail: n.message });
+    });
+    if (!actions.restage.length && !actions.opens.length && actions.unstable.length) {
+      items.push({
+        label: actions.unstable.length + ' 个文件没能对齐索引',
+        action: 'note',
+        detail: actions.unstable.join('\n')
+      });
+    }
+    items.push(sep('日常'));
+    items.push({ label: '启用', command: 'zkz-native.enable' });
+    items.push({ label: '关闭', command: 'zkz-native.disable' });
+    items.push(sep('出了问题'));
+    items.push({ label: '刷新编码表', command: 'zkz-native.refreshTable' });
+    items.push({ label: '查看编不回的文件', action: 'list-open', files: actions.opens });
+    items.push({ label: '同步编烧树', command: 'zkz-native.syncKeilTree' });
+    items.push(sep('很少用'));
+    items.push({ label: '保存本地配置', command: 'zkz-native.saveConfigOverlay' });
+    items.push({ label: '还原本地配置', command: 'zkz-native.restoreConfigOverlay' });
+    const pick = await vscode.window.showQuickPick(items, {
+      title: 'zkz-native',
+      placeHolder: '选择要执行的命令'
+    });
+    if (!pick || pick.kind === vscode.QuickPickItemKind.Separator) return;
+    if (pick.command) {
+      await vscode.commands.executeCommand(pick.command);
+      return;
+    }
+    if (pick.action === 'restage') {
+      await commands.restage(pick.rels);
+      return;
+    }
+    if (pick.action === 'open') {
+      await openAt(repo, pick.rel, pick.position);
+      return;
+    }
+    if (pick.action === 'list-open') {
+      const files = pick.files || [];
+      if (!files.length) {
+        commands.note('没有编不回的文件');
+        return;
+      }
+      if (files.length === 1) {
+        await openAt(repo, files[0].rel, files[0].position);
+        return;
+      }
+      const sub = await vscode.window.showQuickPick(files.map((f) => ({
+        label: f.rel,
+        description: f.message,
+        rel: f.rel,
+        position: f.position
+      })), { title: '编不回 GBK 的文件' });
+      if (sub) await openAt(repo, sub.rel, sub.position);
+      return;
+    }
+    if (pick.action === 'note') commands.note(pick.detail);
+  }
+
+  context.subscriptions.push(vscode.commands.registerCommand('zkz-native.showCommandMenu', showMenu));
+
   if (opts && opts.defer) {
-    item.text = '$(symbol-enum) zkz-native: 初始化中';
-    item.tooltip = 'zkz-native 正在校验过滤器与编码表';
+    item.text = '$(symbol-enum) native';
+    item.tooltip = '正在检查';
     item.show();
   } else {
     refresh();
   }
   const timer = setInterval(refresh, 15000);
   context.subscriptions.push({ dispose: () => clearInterval(timer) });
-  return { item: item, refresh: refresh };
+  context.subscriptions.push({ dispose: () => { if (flashTimer) clearTimeout(flashTimer); } });
+  return { item: item, refresh: refresh, flash: flash };
 }
 
 module.exports = { create };

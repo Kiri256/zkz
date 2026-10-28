@@ -1,5 +1,7 @@
 'use strict';
 
+const SAFE_INT = BigInt(Number.MAX_SAFE_INTEGER);
+
 function parseCInt(raw) {
   let s = String(raw || '').trim();
   s = s.replace(/[uUlL]+$/, '');
@@ -10,7 +12,17 @@ function parseCInt(raw) {
   return null;
 }
 
-function evalPpExpr(expr, macros) {
+/** JS 位运算只到 32 位。先用 BigInt，结果超出安全整数就交给上层当解析失败。 */
+function bitNum(b) {
+  if (b > SAFE_INT || b < -SAFE_INT) {
+    const err = new Error('unsupported preprocessor syntax');
+    err.code = 'ZKZ_PP_UNSUPPORTED';
+    throw err;
+  }
+  return Number(b);
+}
+
+function evalPpExprResult(expr, macros) {
   const env = macros || {};
   const evalExpr = (e0, depth) => {
     if (depth > 32) return 0;
@@ -22,7 +34,7 @@ function evalPpExpr(expr, macros) {
     e = e.replace(/defined\s+([A-Za-z_]\w*)/g, (_, n) => ((n in env) ? '1' : '0'));
     /** @type {{ t: string, v: string }[]} */
     const tokens = [];
-    const re = /\s+|([A-Za-z_]\w*)|(0[xX][0-9a-fA-F]+[uUlL]*|0[0-7]*[uUlL]*|[1-9]\d*[uUlL]*)|(<<|>>|==|!=|<=|>=|&&|\|\||[()+\-*/%<>&|^~?:!])/g;
+    const re = /\s+|('(?:\\.|[^'\\])*')|([A-Za-z_]\w*)|(0[xX][0-9a-fA-F]+[uUlL]*|0[0-7]*[uUlL]*|[1-9]\d*[uUlL]*)|(<<|>>|==|!=|<=|>=|&&|\|\||[()+\-*/%<>&|^~?:!])/g;
     let m;
     let last = 0;
     while ((m = re.exec(e)) !== null) {
@@ -32,9 +44,10 @@ function evalPpExpr(expr, macros) {
         throw err;
       }
       last = m.index + m[0].length;
-      if (m[1] != null) tokens.push({ t: 'id', v: m[1] });
-      else if (m[2] != null) tokens.push({ t: 'num', v: m[2] });
-      else if (m[3] != null) tokens.push({ t: 'op', v: m[3] });
+      if (m[1] != null) tokens.push({ t: 'chr', v: m[1] });
+      else if (m[2] != null) tokens.push({ t: 'id', v: m[2] });
+      else if (m[3] != null) tokens.push({ t: 'num', v: m[3] });
+      else if (m[4] != null) tokens.push({ t: 'op', v: m[4] });
     }
     if (e.slice(last).trim()) {
       const err = new Error('unsupported preprocessor syntax');
@@ -57,23 +70,101 @@ function evalPpExpr(expr, macros) {
       if (inner != null && /^\(.*\)$/.test(s)) return inner;
       return evalExpr(s, depth + 1);
     };
-    const parseTernary = () => {
-      const cond = parseOr();
+    // 死分支只跳过，不求值。不认识的写法留在没走到的一侧时，整条条件仍可判定。
+    function skipTernary() {
+      skipOr();
       if (wantOp('?')) {
         take();
-        const a = parseTernary();
+        skipTernary();
         if (wantOp(':')) take();
-        const b = parseTernary();
-        return cond ? a : b;
+        skipTernary();
       }
-      return cond;
+    }
+    function skipOr() {
+      skipAnd();
+      while (wantOp('||')) { take(); skipAnd(); }
+    }
+    function skipAnd() {
+      skipBitOr();
+      while (wantOp('&&')) { take(); skipBitOr(); }
+    }
+    function skipBitOr() {
+      skipBitXor();
+      while (wantOp('|')) { take(); skipBitXor(); }
+    }
+    function skipBitXor() {
+      skipBitAnd();
+      while (wantOp('^')) { take(); skipBitAnd(); }
+    }
+    function skipBitAnd() {
+      skipEq();
+      while (wantOp('&')) { take(); skipEq(); }
+    }
+    function skipEq() {
+      skipRel();
+      while (peek() && peek().t === 'op' && (peek().v === '==' || peek().v === '!=')) { take(); skipRel(); }
+    }
+    function skipRel() {
+      skipShift();
+      while (peek() && peek().t === 'op' && ['<=', '>=', '<', '>'].indexOf(peek().v) >= 0) { take(); skipShift(); }
+    }
+    function skipShift() {
+      skipAdd();
+      while (peek() && peek().t === 'op' && (peek().v === '<<' || peek().v === '>>')) { take(); skipAdd(); }
+    }
+    function skipAdd() {
+      skipMul();
+      while (peek() && peek().t === 'op' && (peek().v === '+' || peek().v === '-')) { take(); skipMul(); }
+    }
+    function skipMul() {
+      skipUnary();
+      while (peek() && peek().t === 'op' && ['*', '/', '%'].indexOf(peek().v) >= 0) { take(); skipUnary(); }
+    }
+    function skipUnary() {
+      const p = peek();
+      if (p && p.t === 'op' && (p.v === '!' || p.v === '~' || p.v === '-' || p.v === '+')) {
+        take();
+        skipUnary();
+        return;
+      }
+      skipPrimary();
+    }
+    function skipPrimary() {
+      const p = peek();
+      if (!p) return;
+      if (p.t === 'num' || p.t === 'id' || p.t === 'chr') { take(); return; }
+      if (p.t === 'op' && p.v === '(') {
+        take();
+        skipTernary();
+        if (wantOp(')')) take();
+        return;
+      }
+      take();
+    }
+    const parseTernary = () => {
+      const cond = parseOr();
+      if (!wantOp('?')) return cond;
+      take();
+      if (cond) {
+        const taken = parseTernary();
+        if (wantOp(':')) take();
+        skipTernary();
+        return taken;
+      }
+      skipTernary();
+      if (wantOp(':')) take();
+      return parseTernary();
     };
     const parseOr = () => {
       let left = parseAnd();
       while (wantOp('||')) {
         take();
-        const right = parseAnd();
-        left = (left || right) ? 1 : 0;
+        if (left) {
+          skipAnd();
+          left = 1;
+        } else {
+          left = parseAnd() ? 1 : 0;
+        }
       }
       return left;
     };
@@ -81,8 +172,12 @@ function evalPpExpr(expr, macros) {
       let left = parseBitOr();
       while (wantOp('&&')) {
         take();
-        const right = parseBitOr();
-        left = (left && right) ? 1 : 0;
+        if (!left) {
+          skipBitOr();
+          left = 0;
+        } else {
+          left = parseBitOr() ? 1 : 0;
+        }
       }
       return left;
     };
@@ -90,7 +185,7 @@ function evalPpExpr(expr, macros) {
       let left = parseBitXor();
       while (wantOp('|')) {
         take();
-        left = left | parseBitXor();
+        left = bitNum(BigInt(left) | BigInt(parseBitXor()));
       }
       return left;
     };
@@ -98,7 +193,7 @@ function evalPpExpr(expr, macros) {
       let left = parseBitAnd();
       while (wantOp('^')) {
         take();
-        left = left ^ parseBitAnd();
+        left = bitNum(BigInt(left) ^ BigInt(parseBitAnd()));
       }
       return left;
     };
@@ -106,7 +201,7 @@ function evalPpExpr(expr, macros) {
       let left = parseEq();
       while (wantOp('&')) {
         take();
-        left = left & parseEq();
+        left = bitNum(BigInt(left) & BigInt(parseEq()));
       }
       return left;
     };
@@ -135,8 +230,13 @@ function evalPpExpr(expr, macros) {
       let left = parseAdd();
       while (peek() && peek().t === 'op' && (peek().v === '<<' || peek().v === '>>')) {
         const op = take().v;
-        const right = parseAdd();
-        left = op === '<<' ? (left << right) : (left >> right);
+        const right = BigInt(parseAdd());
+        if (right < 0n || right >= 53n) {
+          const err = new Error('unsupported preprocessor syntax');
+          err.code = 'ZKZ_PP_UNSUPPORTED';
+          throw err;
+        }
+        left = bitNum(op === '<<' ? (BigInt(left) << right) : (BigInt(left) >> right));
       }
       return left;
     };
@@ -163,7 +263,7 @@ function evalPpExpr(expr, macros) {
     const parseUnary = () => {
       const p = peek();
       if (p && p.t === 'op' && p.v === '!') { take(); return parseUnary() ? 0 : 1; }
-      if (p && p.t === 'op' && p.v === '~') { take(); return ~parseUnary(); }
+      if (p && p.t === 'op' && p.v === '~') { take(); return bitNum(~BigInt(parseUnary())); }
       if (p && p.t === 'op' && p.v === '-') { take(); return -parseUnary(); }
       if (p && p.t === 'op' && p.v === '+') { take(); return parseUnary(); }
       return parsePrimary();
@@ -171,6 +271,12 @@ function evalPpExpr(expr, macros) {
     const parsePrimary = () => {
       const p = peek();
       if (!p) return 0;
+      if (p.t === 'chr') {
+        take();
+        const err = new Error('unsupported preprocessor syntax');
+        err.code = 'ZKZ_PP_UNSUPPORTED';
+        throw err;
+      }
       if (p.t === 'num') {
         take();
         const n = parseCInt(p.v);
@@ -195,10 +301,16 @@ function evalPpExpr(expr, macros) {
     return value;
   };
   try {
-    return !!evalExpr(expr, 0);
+    return { ok: true, value: !!evalExpr(expr, 0) };
   } catch (e) {
-    return false;
+    return { ok: false, value: false };
   }
 }
 
-module.exports = { evalPpExpr, parseCInt };
+/** 能解析时返回真假。语法不认识时返回 false，不把没算出来的条件当成 0。 */
+function evalPpExpr(expr, macros) {
+  const r = evalPpExprResult(expr, macros);
+  return r.ok && r.value;
+}
+
+module.exports = { evalPpExpr, evalPpExprResult, parseCInt };

@@ -24,14 +24,11 @@ native 覆盖编码识别、clean/smudge、真实 Git 过滤集成、编码表�
 | `enable` | 配置 process filter、属性和 hook；GBK blob 检出后工作区为 UTF-8，Git 状态不产生伪修改 |
 | `disable` | 工作区恢复仓库编码与换行，Git 状态保持预期；再启用可以恢复 |
 | `refreshTable` | ASCII、GBK、UTF-8、UTF-8 BOM 与 CRLF 记录符合样本；新进程使用更新表 |
-| `checkRoundtrip` | GBK 可表示内容通过，不能表示的内容产生可定位的报告 |
-| `status` | 当前过滤启用状态、编码表统计与失败记录符合实际 |
 | `syncKeilTree` | 业务源生成编烧字节，库使用链接；新增、修改、删除、重命名、撤销和切分支后结果正确 |
-| `copyDebugAxf` | 当前机型 AXF 拷至 `.zkz/output.axf`；缺失时报告错误 |
 | `saveConfigOverlay` | 本地配置保存到权威副本，保存范围符合配置名单 |
 | `restoreConfigOverlay` | 配置从副本恢复，目录和占位文件保留 |
 
-以上前缀为 `zkz-native.`。内部 `isEnabled` 和 `resolveRoot` 分别返回实际过滤状态与真源根目录。检查 pre-commit/pre-push 在独立仓库中正确拦截编码不一致；GBK 无法往返时保留原内容并产生失败记录，不能让 Git 无响应。
+以上前缀为 `zkz-native.`。状态栏只显示 `native 开` 或 `native 关`；悬停显示编码表统计和失败记录，编不回的文件从菜单打开。调试 axf 由 `zkz-keil` 准备调试时拷到 `.zkz/output.axf`。检查 pre-commit/pre-push 在独立仓库中正确拦截编码不一致；GBK 无法往返时保留原内容并产生失败记录，不能让 Git 无响应。
 
 自动事件：切分支后编码表刷新，hook 不同步编烧树；同分支提交与撤销不被当成切分支。编辑器重新获得焦点以及 HEAD 监视/轮询应能捕获外部切分支。
 
@@ -39,21 +36,16 @@ native 覆盖编码识别、clean/smudge、真实 Git 过滤集成、编码表�
 
 | 命令 | 检查结果 |
 | --- | --- |
-| `showMacros` | `.clangd` 与 `yt_version.h` 的宏符合当前机型，点击能跳转定义 |
-| `foldInactiveIfdef` | `.c/.cpp` 的未激活分支折叠，未知宏条件不误折 |
-| `unfoldInactiveIfdef` | 当前编辑器分支展开 |
-| `refreshIfdefFolds` | 清除分析缓存后可见编辑器按新宏重新折叠 |
+| `refreshIfdefFolds` | 清除分析缓存后当前编辑器按新宏重新折叠 |
+| `toggleIfdefFolds` | 状态栏菜单切换折叠开关；关闭时当前文件已折的死分支展开，再打开后重新折上 |
 | `refreshCompileCommands` | 当前工程、target、宏、include 与绝对路径正确，结果可被 clangd 使用 |
-| `reindexClangd` | 清理 clangd 索引并重启；缺失 clangd 扩展时有明确提示 |
-| `restartClangd` | 重启 clangd，已有索引无需删除 |
-| `invalidateMacroImpactIndex` | 宏白名单变化后受影响索引失效；无变化时无多余清理 |
-| `checkFffd` | 样本中的 U+FFFD 被定位，正常文件无误报 |
-| `refreshStatus` | 宏徽章及 clangd 数据库状态符合实际 |
+| `restartClangd` | 状态栏菜单软重启 clangd，不删索引 |
+| `invalidateMacroImpactIndex` | 点了就清空 `index` 目录并保留预编译头 |
 | `restoreCmsisInclude` | 固定基线的 Include 恢复，已有文件跳过，恢复结果未暂存 |
 
-以上前缀为 `zkz-code.`。内部 `beginYtMacroCheckoutGuard`、`syncYtVersionAfterCheckout`、`onHeadChanged` 需按切分支流程调用，检查宏基线与编译数据库刷新。状态栏 `showCommandMenu`、`showClangdMenu` 的项目和执行结果应与命令一致。
+以上前缀为 `zkz-code.`。状态栏宏清单点击能跳到定义。`showCommandMenu` 的项目和执行结果应与命令一致。
 
-自动事件：启动时刷新徽章并折叠已打开源文件；保存或外部修改 `yt_version.h`、`.clangd` 后宏表、折叠与徽章更新。普通源文件打开/切换只套用折叠；业务源打开/保存会检查 FFFD。修改折叠设置后重新折叠；工作区文件夹变化刷新徽章。换分支后宏与编译数据库更新，同分支提交/撤销不误触发。
+自动事件：启动时刷新徽章并折叠已打开源文件；保存或外部修改 `yt_version.h`、`.clangd` 后宏表、折叠与徽章更新。保存或换分支后白名单宏变化会软重启 clangd，连续保存合并成一次，不删索引。普通源文件打开/切换只套用折叠。修改折叠设置后重新折叠；工作区文件夹变化刷新徽章。换分支后宏与编译数据库更新。编译数据库没跟上当前分支时 zkz-code 状态栏变黄，重载窗口后仍变黄并再刷一次。同分支提交/撤销不触发，也不把状态栏标黄。
 
 ## zkz-keil 命令和任务
 
@@ -61,12 +53,12 @@ native 覆盖编码识别、clean/smudge、真实 Git 过滤集成、编码表�
 | --- | --- |
 | `keilBuild` | 增量编译，日志与成功/警告/错误状态符合 UV4 返回结果 |
 | `keilRebuild` | 执行全量重建，HEX/AXF 输出属于当前机型 |
-| `keilFlash` | J-Link 使用当前设备、速度与 HEX；F429 不擦 boot，H750 仅允许预期 QSPI 地址 |
+| `keilFlash` | 状态栏直接烧录，不确认机型。J-Link 使用当前设备、速度与 HEX；F429 不擦 boot，H750 仅允许预期 QSPI 地址 |
 | `prepareCortexDebug` | AXF 与源路径映射正确；缺少 AXF 时符合 README 约定 |
 | `configureLaunch` | 两条调试配置使用当前 device/SVD/GDB/速度，其他配置保留 |
 | `jlinkGdbServerPath` | 调试启动时返回当前机型 GDB Server 路径 |
 
-以上前缀为 `zkz-keil.`。内部 `resolveLayout` 返回当前机型工程与产物路径；`showCommandMenu` 菜单可执行对应命令。TaskProvider 的 Keil Build、J-Link Flash、Prepare Cortex Debug 等任务应能执行，任务退出码与工具状态一致。检查工作区旧 shell 任务是否遮蔽同名任务。
+以上前缀为 `zkz-keil.`。状态栏有编译、重新编译、烧录、准备调试、配置调试。内部 `resolveLayout` 返回当前机型工程与产物路径。任务列表为 Keil Build、Build + Flash + Prepare Debug、Prepare Cortex Debug；重新编译和烧录由状态栏启动对应任务。任务退出码与工具状态一致。检查工作区旧 shell 任务是否遮蔽同名任务。
 
 联动：native 启用时先同步再编译编烧树，产物拷回真源；禁用时编真源。启用过滤却缺少 native 同步命令时应失败。调试断点应映射回真源；换机型后重新生成 launch 配置，确认 GDB Server 随机型解析。缺失工具、编译错误、非法 HEX 和硬件断开应给出错误，不能报告成功。
 
@@ -109,4 +101,4 @@ Get-Content .zkz/run/performance.jsonl -Tail 20
 
 干净 `git status` 通常不执行过滤，不能单独用它证明过滤速度提高。在独立仓库中用相同的一组源文件执行实际触发 clean 的 `git add`，以及触发 smudge 的文件恢复/检出，分别计时，并在每轮开始前重置相同测试状态。已有文件、新文件、GBK/UTF-8、CRLF 和库路径都要覆盖。
 
-性能日志目前覆盖编码表构建、编烧树同步与 compile_commands 生成，不记录每次 clean/smudge。编烧树观察 `cacheHit`、`written`、`skipped`、`dirty` 与 `ms`，并用 `gitListMs`、`sourceScanMs`、`targetCheckMs` 定位文件枚举、源元数据及项目扫描、目标存在检查开销；`dirty` 现在是相对上次同步元数据变化的路径数，不是 Git status 的修改数。编译数据库用 `memoryHit` 区分内存命中，`cacheHit` 包含内存或磁盘。源文件 stat、目录检查和 Git 枚举仍有 I/O；内存命中也不代表整个操作没有 I/O。
+性能日志目前覆盖编码表构建、编烧树同步与 compile_commands 生成，不记录每次 clean/smudge。编烧树观察 `cacheHit`、`written`、`skipped`、`dirty` 与 `ms`，并用 `gitListMs`、`sourceScanMs`、`targetCheckMs` 定位文件枚举、源元数据及项目扫描、目标存在检查开销；`dirty` 现在是相对上次同步元数据变化的路径数，不是 Git status 的修改数。编译数据库日志只有耗时、条目数、机型和 target。源文件 stat、目录检查和 Git 枚举仍有 I/O。

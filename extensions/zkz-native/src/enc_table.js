@@ -37,16 +37,21 @@ function loadTable(repoRoot) {
   const map = emptyTable();
   let meta = null;
   if (fs.existsSync(p)) {
+    let obj = null;
     try {
-      const obj = JSON.parse(fs.readFileSync(p, 'utf8'));
-      meta = (obj && typeof obj === 'object') ? obj : null;
-      const src = (obj && obj.files && typeof obj.files === 'object') ? obj.files : obj;
-      for (const k of Object.keys(src || {})) {
+      obj = JSON.parse(fs.readFileSync(p, 'utf8'));
+    } catch (_) {
+      const err = new Error('编码表无法解析，已停止以免用空表覆盖: ' + p);
+      err.code = 'ZKZ_TABLE_CORRUPT';
+      throw err;
+    }
+    meta = (obj && typeof obj === 'object') ? obj : null;
+    const src = (obj && obj.files && typeof obj.files === 'object') ? obj.files : obj;
+    if (src && typeof src === 'object' && !Array.isArray(src)) {
+      for (const k of Object.keys(src)) {
         const kind = String(src[k] || '');
         if (kind) map[slashRel(k)] = kind;
       }
-    } catch (_) {
-      meta = null;
     }
   }
   rememberTable(repoRoot, mtime, map, meta);
@@ -64,35 +69,54 @@ function noteTableRef(repoRoot, meta) {
   if (!meta || meta.ref) return meta;
   const ref = readHeadName(repoRoot);
   if (!ref) return meta;
-  meta.ref = ref;
+  const lockDir = acquireLock(repoRoot, 'encoding-table');
   try {
+    meta.ref = ref;
     atomicWriteJson(tablePath(repoRoot), meta);
     if (gTableCache.root === repoRoot && gTableCache.meta === meta) {
       gTableCache.mtime = tableStamp(tablePath(repoRoot));
     }
-  } catch (_) { /* ignore */ }
+  } catch (_) { /* ignore */ } finally {
+    releaseLock(lockDir);
+  }
   return meta;
 }
 
-function noteNewFile(repoRoot, pathname, mapped) {
-  if (!repoRoot || !pathname || !mapped) return;
+function mappingOf(repoRoot, pathname) {
+  if (!repoRoot || !pathname) return '';
+  const files = loadTable(repoRoot);
+  return files[slashRel(pathname)] || '';
+}
+
+function noteNewFile(repoRoot, pathname, mapped, opts) {
+  if (!repoRoot || !pathname || !mapped) return mapped || '';
+  const overwrite = !!(opts && opts.overwrite);
   const key = slashRel(pathname);
-  // Keil sync already holds the repository operation lock. Git filters can
-  // also run in a child process while that lock is held: use a separate lock
-  // for the short encoding-table read/modify/write transaction.
+  // 编烧树同步持有仓库锁时，过滤器和刷新仍会改编码表，所以这里用另一把锁。
   const lockDir = acquireLock(repoRoot, 'encoding-table');
   try {
     if (gTableCache.root === repoRoot) gTableCache.map = null;
     const files = loadTable(repoRoot);
-    if (files[key]) return;
+    if (files[key] && !overwrite) return files[key];
+    if (files[key] === mapped) return mapped;
     files[key] = mapped;
-    saveTable(repoRoot, files);
+    saveTableUnlocked(repoRoot, files);
+    return mapped;
   } finally {
     releaseLock(lockDir);
   }
 }
 
 function saveTable(repoRoot, files, extra) {
+  const lockDir = acquireLock(repoRoot, 'encoding-table');
+  try {
+    return saveTableUnlocked(repoRoot, files, extra);
+  } finally {
+    releaseLock(lockDir);
+  }
+}
+
+function saveTableUnlocked(repoRoot, files, extra) {
   ensureZkz(repoRoot);
   const ordered = {};
   Object.keys(files).sort().forEach((k) => { ordered[slashRel(k)] = files[k]; });
@@ -148,14 +172,42 @@ async function buildTableIncremental(repoRoot, from, to, skipLib) {
   const parsed = parseNameStatusZ(r.stdout);
   const files = emptyTable();
   Object.keys(existing).forEach((k) => { files[k] = existing[k]; });
-  parsed.removed.forEach((p) => { delete files[p]; });
-  const add = parsed.added.filter((p) => !(skipLib && isLibRel(repoRoot, p)));
-  if (add.length) await fillKinds(repoRoot, files, add);
-  const meta = saveTable(repoRoot, files);
+  const detect = [];
+  for (let i = 0; i < parsed.records.length; i++) {
+    const rec = parsed.records[i];
+    const path = rec.path || '';
+    const oldPath = rec.oldPath || '';
+    const pathIsLib = !!(path && skipLib && isLibRel(repoRoot, path));
+    if (rec.status === 'M') continue;
+    if ((rec.status === 'R' || rec.status === 'C') && oldPath && existing[oldPath] && !pathIsLib) {
+      files[path] = existing[oldPath];
+    } else if (!pathIsLib && path && (rec.status === 'A' || rec.status === 'R' || rec.status === 'C' || rec.status === 'T')) {
+      detect.push(path);
+    }
+  }
+  for (let i = 0; i < parsed.records.length; i++) {
+    const rec = parsed.records[i];
+    if ((rec.status === 'D' || rec.status === 'R') && rec.oldPath) delete files[rec.oldPath];
+  }
+  if (detect.length) await fillKinds(repoRoot, files, detect);
+  const meta = saveTableUnlocked(repoRoot, files);
   return { files: files, meta: meta, counts: countByKind(files), incremental: true };
 }
 
 async function buildTable(repoRoot, opts) {
+  const lockDir = acquireLock(repoRoot, 'encoding-table');
+  try {
+    if (gTableCache.root === repoRoot) {
+      gTableCache.map = null;
+      gTableCache.meta = null;
+    }
+    return await buildTableBody(repoRoot, opts);
+  } finally {
+    releaseLock(lockDir);
+  }
+}
+
+async function buildTableBody(repoRoot, opts) {
   const perfStart = process.hrtime.bigint();
   const skipLib = !(opts && opts.includeLibs);
   const force = !!(opts && opts.force);
@@ -177,7 +229,7 @@ async function buildTable(repoRoot, opts) {
   });
   const files = emptyTable();
   await fillKinds(repoRoot, files, paths);
-  const meta = saveTable(repoRoot, files);
+  const meta = saveTableUnlocked(repoRoot, files);
   recordPerf(repoRoot, 'zkz-native.buildEncodingTable', {
     ms: Number(process.hrtime.bigint() - perfStart) / 1e6,
     files: Object.keys(files).length,
@@ -191,6 +243,7 @@ module.exports = {
   loadTable,
   loadMeta,
   noteTableRef,
+  mappingOf,
   noteNewFile,
   saveTable,
   countByKind,

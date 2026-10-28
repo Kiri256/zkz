@@ -2,7 +2,7 @@
   "name": "zkz-keil",
   "displayName": "zkz Keil",
   "description": "Keil UV4 build, J-Link flash, and Cortex-Debug prepare. True-source + zkz-native builds the keil-native tree.",
-  "version": "1.0.31",
+  "version": "0.0.35",
   "publisher": "zkz",
   "icon": "media/zkz-keil.png",
   "engines": {
@@ -20,37 +20,41 @@
     "commands": [
       {
         "command": "zkz-keil.keilBuild",
-        "title": "zkz: Keil Build",
+        "title": "zkz: 编译",
         "icon": "$(tools)",
         "enablement": "zkzKeil.paired"
       },
       {
         "command": "zkz-keil.keilRebuild",
-        "title": "zkz: Keil Rebuild",
+        "title": "zkz: 重新编译",
         "icon": "$(sync)",
         "enablement": "zkzKeil.paired"
       },
       {
         "command": "zkz-keil.keilFlash",
-        "title": "zkz: J-Link Flash",
+        "title": "zkz: 烧录",
         "icon": "$(zap)",
         "enablement": "zkzKeil.paired"
       },
       {
         "command": "zkz-keil.prepareCortexDebug",
-        "title": "zkz: Prepare Cortex Debug",
+        "title": "zkz: 准备调试",
         "icon": "$(debug-alt)",
         "enablement": "zkzKeil.paired"
       },
       {
         "command": "zkz-keil.configureLaunch",
-        "title": "zkz: Configure Launch",
+        "title": "zkz: 配置调试",
         "icon": "$(debug-configure)",
         "enablement": "zkzKeil.paired"
       },
       {
         "command": "zkz-keil.jlinkGdbServerPath",
         "title": "zkz: J-Link GDB Server Path"
+      },
+      {
+        "command": "zkz-keil.debugSpeed",
+        "title": "zkz: Debug Speed"
       },
       {
         "command": "zkz-keil.gdbPath",
@@ -66,9 +70,28 @@
         {
           "command": "zkz-keil.gdbPath",
           "when": "false"
+        },
+        {
+          "command": "zkz-keil.debugSpeed",
+          "when": "false"
         }
       ]
     },
+    "problemMatchers": [
+      {
+        "name": "zkz-keil",
+        "owner": "zkz-keil",
+        "source": "keil",
+        "fileLocation": "autoDetect",
+        "pattern": {
+          "regexp": "^(.+)\\((\\d+)\\):\\s*(error|warning|Error|Warning)\\s*:\\s*(.+)$",
+          "file": 1,
+          "line": 2,
+          "severity": 3,
+          "message": 4
+        }
+      }
+    ],
     "taskDefinitions": [
       {
         "type": "zkz-keil",
@@ -78,7 +101,7 @@
         "properties": {
           "action": {
             "type": "string",
-            "description": "build, rebuild, flash, prepare, buildFlash, buildFlashPrepare, flashPrepare"
+            "description": "build, rebuild, flash, prepare, buildFlashPrepare"
           }
         }
       }

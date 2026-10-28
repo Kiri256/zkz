@@ -2,7 +2,7 @@
   "name": "zkz-native",
   "displayName": "zkz Native",
   "description": "Open the true-source tree as UTF-8 via git clean/smudge. Keeps repo blobs in original GBK/ASCII/UTF-8.",
-  "version": "0.0.77",
+  "version": "0.0.80",
   "publisher": "zkz",
   "engines": {
     "vscode": "^1.80.0"
@@ -29,20 +29,8 @@
         "title": "zkz Native: Refresh encoding table"
       },
       {
-        "command": "zkz-native.checkRoundtrip",
-        "title": "zkz Native: Check cp936 roundtrip"
-      },
-      {
-        "command": "zkz-native.status",
-        "title": "zkz Native: Status"
-      },
-      {
         "command": "zkz-native.syncKeilTree",
         "title": "zkz Native: Sync Keil tree"
-      },
-      {
-        "command": "zkz-native.copyDebugAxf",
-        "title": "zkz Native: Copy debug axf"
       },
       {
         "command": "zkz-native.saveConfigOverlay",
@@ -51,10 +39,6 @@
       {
         "command": "zkz-native.restoreConfigOverlay",
         "title": "zkz Native: Restore local config"
-      },
-      {
-        "command": "zkz-native.warmTextconv",
-        "title": "zkz Native: Warm textconv cache"
       }
     ]
   },

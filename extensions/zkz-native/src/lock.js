@@ -7,7 +7,7 @@ const { runDir, relocateRunFiles, sleepSync } = require('./paths');
 
 const chains = Object.create(null);
 const LOCK_TTL_MS = 60 * 1000;
-const LOCK_WAIT_MS = 10 * 1000;
+const LOCK_WAIT_MS = 180 * 1000;
 const LOCK_POLL_MS = 50;
 
 function lockDirFor(key, scope) {
@@ -51,10 +51,8 @@ function isStale(lockDir) {
       return true;
     }
   }
-  if (rec.pid && isAlive(rec.pid)) {
-    const at = Number(rec.at) || 0;
-    return !!(at && Date.now() - at > LOCK_TTL_MS);
-  }
+  // 编烧树同步常常超过 LOCK_TTL_MS。进程还在就一直等，不把锁抢走。
+  if (rec.pid && isAlive(rec.pid)) return false;
   return true;
 }
 
@@ -128,6 +126,7 @@ module.exports = {
   acquireLock,
   releaseLock,
   lockDirFor,
+  isStale,
   LOCK_TTL_MS,
   LOCK_WAIT_MS
 };
