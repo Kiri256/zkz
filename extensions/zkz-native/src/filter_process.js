@@ -1,10 +1,11 @@
 'use strict';
 
-const { loadTable } = require('./enc_table');
+const { loadTable, setNoteDefer, flushDeferredNotes } = require('./enc_table');
 const { smudge, clean } = require('./filter_core');
 const { findRepoRoot, createLibMatcher } = require('./paths');
 const { PktReader, encodePacket, encodeFlush, writeContent, writeAll } = require('./pktline');
 const { recordFilterFail, resetFilterFail, recordHandshakeReject } = require('./observe');
+const { closeCatSessions } = require('./git_exec');
 
 function setBlocking() {
   // Windows 上 git 以管道读 filter stdout；不阻塞时半包会让握手失败。
@@ -94,15 +95,22 @@ async function handleOne(reader, out, table, repoRoot, state) {
 
 async function main() {
   setBlocking();
-  const reader = new PktReader(process.stdin);
-  const repoRoot = findRepoRoot(process.env.GIT_WORK_TREE || process.cwd());
-  const out = process.stdout;
-  if (!await handshake(reader, out, repoRoot)) return;
-  const table = loadTable(repoRoot);
-  const state = { filterFailReset: false, isLibraryPath: createLibMatcher(repoRoot, true) };
-  for (; ;) {
-    const more = await handleOne(reader, out, table, repoRoot, state);
-    if (!more) break;
+  setNoteDefer(true);
+  try {
+    const reader = new PktReader(process.stdin);
+    const repoRoot = findRepoRoot(process.env.GIT_WORK_TREE || process.cwd());
+    const out = process.stdout;
+    if (!await handshake(reader, out, repoRoot)) return;
+    const table = loadTable(repoRoot);
+    const state = { filterFailReset: false, isLibraryPath: createLibMatcher(repoRoot, true) };
+    for (; ;) {
+      const more = await handleOne(reader, out, table, repoRoot, state);
+      if (!more) break;
+    }
+  } finally {
+    try { flushDeferredNotes(); } catch (_) { /* 表写不上，下次检出再补 */ }
+    try { closeCatSessions(); } catch (_) { /* ignore */ }
+    setNoteDefer(false);
   }
 }
 

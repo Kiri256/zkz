@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync, spawn } = require('child_process');
+const { Worker } = require('worker_threads');
 const { slashRel } = require('./paths');
 
 function gitArgs(args) {
@@ -13,6 +14,12 @@ function gitArgs(args) {
   return a;
 }
 
+function gitBin() {
+  return (process.env.ZKZ_REAL_GIT && fs.existsSync(process.env.ZKZ_REAL_GIT))
+    ? process.env.ZKZ_REAL_GIT
+    : 'git';
+}
+
 function git(repoRoot, args, opts) {
   const o = opts || {};
   const env = Object.assign({}, process.env);
@@ -20,10 +27,7 @@ function git(repoRoot, args, opts) {
   delete env.ZKZ_LOCAL_WATCH;
   delete env.ZKZ_LOCAL_REPO;
   // 替身进程里指向真正的 git.exe，避免 checkout-index 再进到自己。
-  const bin = (process.env.ZKZ_REAL_GIT && fs.existsSync(process.env.ZKZ_REAL_GIT))
-    ? process.env.ZKZ_REAL_GIT
-    : 'git';
-  const r = spawnSync(bin, gitArgs(args), {
+  const r = spawnSync(gitBin(), gitArgs(args), {
     cwd: repoRoot,
     windowsHide: true,
     encoding: o.encoding === 'buffer' ? undefined : (o.encoding || 'utf8'),
@@ -314,8 +318,167 @@ function parseIndexOids(buf) {
   return map;
 }
 
+// 一次检出里 clean 会逐个问原编码。每个文件起一个 git 要十几秒。
+// Windows 管道没有文件描述符，不能在这条线程上同步读，所以 cat-file 放在工作线程里，调用方用 Atomics 等结果。
+const CAT_PAYLOAD = 16 * 1024 * 1024;
+const catSessions = new Map();
+let catSessionBroken = false;
+
+const CAT_WORKER = [
+  "'use strict';",
+  "const { workerData } = require('worker_threads');",
+  "const { spawn } = require('child_process');",
+  "const i32 = new Int32Array(workerData.sab);",
+  "const bytes = Buffer.from(workerData.sab);",
+  "const OFF = 16;",
+  "function publish(state) { Atomics.store(i32, 0, state); Atomics.notify(i32, 0, 1); }",
+  "const child = spawn(workerData.bin, workerData.args, { cwd: workerData.cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });",
+  "child.stdin.on('error', function () {});",
+  "child.stdout.on('error', function () {});",
+  "let buf = Buffer.alloc(0);",
+  "let pending = null;",
+  "function takeOne() {",
+  "  const nl = buf.indexOf(10);",
+  "  if (nl < 0) return null;",
+  "  const header = buf.subarray(0, nl).toString('utf8');",
+  "  if (/\\smissing$/.test(header)) { buf = buf.subarray(nl + 1); return { missing: true, data: Buffer.alloc(0) }; }",
+  "  const parts = header.split(' ');",
+  "  const size = parseInt(parts[2], 10);",
+  "  if (!isFinite(size) || size < 0) return { error: header };",
+  "  const start = nl + 1;",
+  "  if (buf.length < start + size + 1) return null;",
+  "  const data = Buffer.from(buf.subarray(start, start + size));",
+  "  buf = buf.subarray(start + size + 1);",
+  "  return { missing: false, data: data, oid: parts[0] };",
+  "}",
+  "function pump() {",
+  "  if (!pending) return;",
+  "  const rec = takeOne();",
+  "  if (!rec) return;",
+  "  const done = pending;",
+  "  pending = null;",
+  "  done(rec);",
+  "}",
+  "child.stdout.on('data', function (chunk) { buf = buf.length ? Buffer.concat([buf, chunk]) : chunk; pump(); });",
+  "function ask(spec) {",
+  "  return new Promise(function (resolve, reject) {",
+  "    pending = resolve;",
+  "    child.stdin.write(spec + '\\n', function (err) { if (err) reject(err); });",
+  "    pump();",
+  "  });",
+  "}",
+  "Atomics.store(i32, 3, 1);",
+  "Atomics.notify(i32, 3, 1);",
+  "(async function () {",
+  "  for (;;) {",
+  "    while (Atomics.load(i32, 0) === 0) Atomics.wait(i32, 0, 0);",
+  "    const cmd = Atomics.load(i32, 0);",
+  "    if (cmd === 4) break;",
+  "    const n = Atomics.load(i32, 1);",
+  "    const spec = Buffer.from(bytes.subarray(OFF, OFF + n)).toString('utf8');",
+  "    try {",
+  "      const rec = await ask(spec);",
+  "      if (rec.error) throw new Error(rec.error);",
+  "      if (rec.data.length > bytes.length - OFF) throw new Error('blob too big');",
+  "      if (rec.data.length) bytes.set(rec.data, OFF);",
+  "      Atomics.store(i32, 1, rec.data.length);",
+  "      Atomics.store(i32, 2, rec.missing ? 1 : 0);",
+  "      publish(2);",
+  "    } catch (e) {",
+  "      const msg = Buffer.from(String(e && e.message ? e.message : e));",
+  "      const len = Math.min(200, msg.length);",
+  "      if (len) bytes.set(msg.subarray(0, len), OFF);",
+  "      Atomics.store(i32, 1, len);",
+  "      publish(3);",
+  "    }",
+  "    for (;;) {",
+  "      const s = Atomics.load(i32, 0);",
+  "      if (s !== 2 && s !== 3) break;",
+  "      Atomics.wait(i32, 0, s);",
+  "    }",
+  "  }",
+  "  try { child.kill(); } catch (e) {}",
+  "})();"
+].join('\n');
+
+function catSessionWanted() {
+  if (catSessionBroken) return false;
+  const script = String(process.argv[1] || '').replace(/\\/g, '/');
+  return script.endsWith('/filter_process.js');
+}
+
+function closeCatSession(repoRoot) {
+  const slot = catSessions.get(repoRoot);
+  if (!slot) return;
+  catSessions.delete(repoRoot);
+  try {
+    Atomics.store(slot.i32, 0, 4);
+    Atomics.notify(slot.i32, 0, 1);
+  } catch (_) { /* ignore */ }
+  try { slot.worker.terminate(); } catch (_) { /* ignore */ }
+}
+
+function closeCatSessions() {
+  for (const root of Array.from(catSessions.keys())) closeCatSession(root);
+}
+
+function openCatSession(repoRoot) {
+  const existing = catSessions.get(repoRoot);
+  if (existing) return existing;
+  const sab = new SharedArrayBuffer(16 + CAT_PAYLOAD);
+  const i32 = new Int32Array(sab);
+  const worker = new Worker(CAT_WORKER, {
+    eval: true,
+    workerData: {
+      sab: sab,
+      bin: gitBin(),
+      args: gitArgs(['cat-file', '--batch']),
+      cwd: repoRoot
+    }
+  });
+  worker.unref();
+  worker.on('error', () => { catSessionBroken = true; });
+  const slot = { worker: worker, i32: i32, bytes: Buffer.from(sab) };
+  catSessions.set(repoRoot, slot);
+  if (Atomics.load(i32, 3) !== 1) Atomics.wait(i32, 3, 0, 15000);
+  if (Atomics.load(i32, 3) !== 1) throw new Error('cat-file 工作线程没有起来');
+  return slot;
+}
+
+function catFileOne(repoRoot, spec) {
+  const slot = openCatSession(repoRoot);
+  const specBuf = Buffer.from(String(spec), 'utf8');
+  if (specBuf.length > 500) throw new Error('spec too long');
+  slot.bytes.set(specBuf, 16);
+  Atomics.store(slot.i32, 1, specBuf.length);
+  Atomics.store(slot.i32, 0, 1);
+  Atomics.notify(slot.i32, 0, 1);
+  if (Atomics.load(slot.i32, 0) === 1) Atomics.wait(slot.i32, 0, 1, 20000);
+  const state = Atomics.load(slot.i32, 0);
+  const n = Atomics.load(slot.i32, 1);
+  if (state === 3) {
+    const msg = slot.bytes.subarray(16, 16 + n).toString('utf8');
+    Atomics.store(slot.i32, 0, 0);
+    Atomics.notify(slot.i32, 0, 1);
+    throw new Error(msg || 'cat-file worker');
+  }
+  if (state !== 2) throw new Error('cat-file timeout');
+  const missing = Atomics.load(slot.i32, 2) === 1;
+  const data = Buffer.from(slot.bytes.subarray(16, 16 + n));
+  Atomics.store(slot.i32, 0, 0);
+  Atomics.notify(slot.i32, 0, 1);
+  return { missing: missing, header: '', oid: String(spec), data: data };
+}
+
 function tryCatFileBatch(repoRoot, specs) {
   if (!specs || !specs.length) return [];
+  if (specs.length === 1 && catSessionWanted()) {
+    try { return [catFileOne(repoRoot, specs[0])]; }
+    catch (_) {
+      catSessionBroken = true;
+      closeCatSession(repoRoot);
+    }
+  }
   const r = git(repoRoot, ['cat-file', '--batch'], {
     input: specs.join('\n') + '\n',
     encoding: 'buffer',
@@ -362,5 +525,6 @@ module.exports = {
   catFileBatch,
   catFileBatchSync,
   tryCatFileBatch,
-  indexBlobOid
+  indexBlobOid,
+  closeCatSessions
 };

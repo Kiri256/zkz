@@ -1198,13 +1198,13 @@ async function runAsync() {
 
   try {
     const { Writable } = require('stream');
-    const { writeContent, writeAll } = require('../src/pktline');
+    const { writeContent, writeAll, CONTENT_BATCH } = require('../src/pktline');
     const body = Buffer.alloc(MAX_PAYLOAD * 2 + 17, 0xa5);
     const packets = [];
     const sink = new Writable({
       highWaterMark: 1,
       write(chunk, _encoding, callback) {
-        assert.ok(chunk.length <= MAX_PAYLOAD + 4);
+        assert.ok(chunk.length <= CONTENT_BATCH);
         packets.push(Buffer.from(chunk));
         setImmediate(callback);
       }

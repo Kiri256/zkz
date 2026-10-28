@@ -19,6 +19,23 @@ function readJson(p, fallback) {
   }
 }
 
+// 同一次过滤里只读一次。切回含大量 GBK 的分支时，不再每个文件打开这份记录。
+let roundtripCache = { path: '', ready: false, obj: null };
+
+function cachedRoundtrip(repoRoot) {
+  const p = roundtripFailPath(repoRoot);
+  if (roundtripCache.ready && roundtripCache.path === p) return roundtripCache.obj;
+  const obj = readJson(p, null);
+  roundtripCache = { path: p, ready: true, obj: obj };
+  return obj;
+}
+
+function writeRoundtrip(repoRoot, obj) {
+  const p = roundtripFailPath(repoRoot);
+  atomicWriteJson(p, obj);
+  roundtripCache = { path: p, ready: true, obj: obj };
+}
+
 function loadRoundtripFailures(repoRoot) {
   const obj = readJson(roundtripFailPath(repoRoot), { files: {} });
   const files = (obj && obj.files && typeof obj.files === 'object') ? obj.files : {};
@@ -38,8 +55,8 @@ function recordRoundtripFailure(repoRoot, pathname, err) {
   if (!repoRoot) return;
   try {
     ensureZkz(repoRoot);
-    const p = roundtripFailPath(repoRoot);
-    const obj = readJson(p, { files: {} });
+    let obj = cachedRoundtrip(repoRoot);
+    if (!obj || typeof obj !== 'object') obj = { files: {} };
     if (!obj.files || typeof obj.files !== 'object') obj.files = {};
     const rel = slashRel(pathname);
     obj.at = formatLocalNow();
@@ -47,7 +64,7 @@ function recordRoundtripFailure(repoRoot, pathname, err) {
       message: String(err && err.message ? err.message : err),
       at: obj.at
     };
-    atomicWriteJson(p, obj);
+    writeRoundtrip(repoRoot, obj);
     appendLog(repoRoot, 'roundtrip soft-fail ' + rel);
   } catch (_) { /* ignore */ }
 }
@@ -89,8 +106,8 @@ function recordCp936Drop(repoRoot, pathname, info) {
   if (!repoRoot || !info || !info.count) return;
   try {
     ensureZkz(repoRoot);
-    const p = roundtripFailPath(repoRoot);
-    const obj = readJson(p, { files: {} });
+    let obj = cachedRoundtrip(repoRoot);
+    if (!obj || typeof obj !== 'object') obj = { files: {} };
     if (!obj.drops || typeof obj.drops !== 'object') obj.drops = {};
     const rel = slashRel(pathname);
     const stage = info.stage === 'smudge' ? 'smudge' : 'clean';
@@ -103,7 +120,7 @@ function recordCp936Drop(repoRoot, pathname, info) {
       message: String(info.message || ''),
       at: at
     };
-    atomicWriteJson(p, obj);
+    writeRoundtrip(repoRoot, obj);
     appendLog(repoRoot, 'cp936 drop ' + rel + ' ' + (info.message || ''));
   } catch (_) { /* ignore */ }
 }
@@ -111,8 +128,7 @@ function recordCp936Drop(repoRoot, pathname, info) {
 function clearCp936Drop(repoRoot, pathname, stage) {
   if (!repoRoot) return;
   try {
-    const p = roundtripFailPath(repoRoot);
-    const obj = readJson(p, null);
+    const obj = cachedRoundtrip(repoRoot);
     if (!obj || !obj.drops) return;
     const rel = slashRel(pathname);
     const rec = obj.drops[rel];
@@ -121,21 +137,20 @@ function clearCp936Drop(repoRoot, pathname, stage) {
     else delete obj.drops[rel];
     if (obj.drops[rel] && !obj.drops[rel].clean && !obj.drops[rel].smudge) delete obj.drops[rel];
     obj.at = formatLocalNow();
-    atomicWriteJson(p, obj);
+    writeRoundtrip(repoRoot, obj);
   } catch (_) { /* ignore */ }
 }
 
 function clearRoundtripFailure(repoRoot, pathname) {
   if (!repoRoot) return;
   try {
-    const p = roundtripFailPath(repoRoot);
-    const obj = readJson(p, null);
+    const obj = cachedRoundtrip(repoRoot);
     if (!obj || !obj.files) return;
     const rel = slashRel(pathname);
     if (!Object.prototype.hasOwnProperty.call(obj.files, rel)) return;
     delete obj.files[rel];
     obj.at = formatLocalNow();
-    atomicWriteJson(p, obj);
+    writeRoundtrip(repoRoot, obj);
   } catch (_) { /* ignore */ }
 }
 

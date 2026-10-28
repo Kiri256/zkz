@@ -1,6 +1,8 @@
 'use strict';
 
 const MAX_PAYLOAD = 65516;
+// 一次写出多包，避免检出大批 GBK 文件时每 64KB 都等管道排空。
+const CONTENT_BATCH = 1024 * 1024;
 const INPUT_HIGH_WATER = 4 * (MAX_PAYLOAD + 4);
 const INPUT_LOW_WATER = MAX_PAYLOAD + 4;
 
@@ -250,13 +252,31 @@ function writeAll(stream, buf) {
 
 async function writeContent(stream, body) {
   const src = body == null ? Buffer.alloc(0) : (Buffer.isBuffer(body) ? body : Buffer.from(body));
+  if (!src.length) return;
+  let parts = [];
+  let pending = 0;
+  const flush = async () => {
+    if (!pending) return;
+    const buf = parts.length === 1 ? parts[0] : Buffer.concat(parts, pending);
+    parts = [];
+    pending = 0;
+    await writeAll(stream, buf);
+  };
   for (let offset = 0; offset < src.length; offset += MAX_PAYLOAD) {
-    await writeAll(stream, encodePacket(src.subarray(offset, offset + MAX_PAYLOAD)));
+    const length = Math.min(MAX_PAYLOAD, src.length - offset);
+    const packet = Buffer.allocUnsafe(length + 4);
+    packet.write(hex4(length + 4), 0, 4, 'ascii');
+    src.copy(packet, 4, offset, offset + length);
+    if (pending && pending + packet.length > CONTENT_BATCH) await flush();
+    parts.push(packet);
+    pending += packet.length;
   }
+  await flush();
 }
 
 module.exports = {
   MAX_PAYLOAD,
+  CONTENT_BATCH,
   encodePacket,
   encodeFlush,
   encodeContent,

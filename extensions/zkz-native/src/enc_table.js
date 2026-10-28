@@ -88,10 +88,58 @@ function mappingOf(repoRoot, pathname) {
   return files[slashRel(pathname)] || '';
 }
 
+let deferNotes = false;
+const deferredNotes = [];
+
+/** 过滤进程里先改内存，结束时再写一次编码表。避免每个文件都抢锁重写整份 JSON。 */
+function setNoteDefer(on) {
+  deferNotes = !!on;
+}
+
+function noteNewFileDeferred(repoRoot, key, mapped, overwrite) {
+  const files = loadTable(repoRoot);
+  if (files[key] && !overwrite) return files[key];
+  if (files[key] === mapped) return mapped;
+  files[key] = mapped;
+  deferredNotes.push({ repoRoot: repoRoot, key: key, mapped: mapped, overwrite: overwrite });
+  return mapped;
+}
+
+/** 把这一次过滤里积下的编码写回磁盘。过滤进程结束时调用。失败则抛出。 */
+function flushDeferredNotes() {
+  if (!deferredNotes.length) return;
+  const queue = deferredNotes.splice(0, deferredNotes.length);
+  const roots = [];
+  for (let i = 0; i < queue.length; i++) {
+    if (roots.indexOf(queue[i].repoRoot) < 0) roots.push(queue[i].repoRoot);
+  }
+  for (let i = 0; i < roots.length; i++) {
+    const repoRoot = roots[i];
+    const lockDir = acquireLock(repoRoot, 'encoding-table');
+    try {
+      if (gTableCache.root === repoRoot) gTableCache.map = null;
+      const files = loadTable(repoRoot);
+      let changed = false;
+      for (let j = 0; j < queue.length; j++) {
+        const op = queue[j];
+        if (op.repoRoot !== repoRoot) continue;
+        if (files[op.key] && !op.overwrite) continue;
+        if (files[op.key] === op.mapped) continue;
+        files[op.key] = op.mapped;
+        changed = true;
+      }
+      if (changed) saveTableUnlocked(repoRoot, files);
+    } finally {
+      releaseLock(lockDir);
+    }
+  }
+}
+
 function noteNewFile(repoRoot, pathname, mapped, opts) {
   if (!repoRoot || !pathname || !mapped) return mapped || '';
   const overwrite = !!(opts && opts.overwrite);
   const key = slashRel(pathname);
+  if (deferNotes) return noteNewFileDeferred(repoRoot, key, mapped, overwrite);
   // 编烧树同步持有仓库锁时，过滤器和刷新仍会改编码表，所以这里用另一把锁。
   const lockDir = acquireLock(repoRoot, 'encoding-table');
   try {
@@ -247,5 +295,7 @@ module.exports = {
   noteNewFile,
   saveTable,
   countByKind,
-  buildTable
+  buildTable,
+  setNoteDefer,
+  flushDeferredNotes
 };

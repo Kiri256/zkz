@@ -51,7 +51,7 @@ function sentinelChar(byte) {
 }
 
 function decodeCp936Bytes(buf) {
-  const src = Buffer.from(buf);
+  const src = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
   const iconv = requireIconv();
   let out = '';
   let i = 0;
@@ -79,7 +79,7 @@ function decodeCp936Bytes(buf) {
 
 function decodeCp936Raw(buf) {
   if (!buf || !buf.length) return '';
-  const src = Buffer.from(buf);
+  const src = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
   const text = requireIconv().decode(src, 'gbk');
   if (text.indexOf('\uFFFD') < 0) return text;
   return decodeCp936Bytes(src);
@@ -87,6 +87,7 @@ function decodeCp936Raw(buf) {
 
 function cp936DropInfo(text, stage) {
   const t = String(text);
+  if (t.indexOf('\uFFFD') < 0) return { stage: stage, count: 0, positions: [], message: '' };
   const positions = [];
   for (let i = 0; i < t.length; i++) {
     if (t.charCodeAt(i) === 0xFFFD) positions.push(i);
@@ -150,7 +151,7 @@ function wtToText(buf) {
 
 function applySmudge(kind, blobBytes, opts) {
   const k = kind || 'Ascii';
-  const buf = blobBytes ? Buffer.from(blobBytes) : Buffer.alloc(0);
+  const buf = !blobBytes ? Buffer.alloc(0) : (Buffer.isBuffer(blobBytes) ? blobBytes : Buffer.from(blobBytes));
   if (k === 'Ascii' || k === 'Utf8') return buf;
   if (k === 'Utf8Bom') return hasUtf8Bom(buf) ? buf.slice(3) : buf;
   if (k === 'Gbk') {
