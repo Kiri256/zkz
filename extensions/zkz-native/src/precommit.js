@@ -300,6 +300,11 @@ function reconcileCommitReject(repoRoot) {
 }
 
 async function runPrecommit(repoRoot) {
+  try { require('./local_filter').keepCommitBlob(repoRoot); }
+  catch (e) {
+    process.stderr.write('zkz-native: ' + String(e && e.message ? e.message : e) + '\n');
+    return 1;
+  }
   const r = await checkStaged(repoRoot);
   for (const w of r.warnings) process.stderr.write('zkz-native warning: ' + w + '\n');
   if (r.errors.length) {

@@ -6,7 +6,7 @@ const { isInstalled } = require('./git_config');
 const { enable, disable, refresh, statusSnapshot, statusLines } = require('./bootstrap');
 const { git } = require('./git_exec');
 const { syncKeilTree } = require('./keil_tree');
-const { seedOverlay, restoreOverlay } = require('./overlay');
+const { installLocalConfig, uninstallLocalConfig, isLocalInstalled } = require('./git_config');
 const { withLock } = require('./lock');
 const { dismissCommitReject } = require('./observe');
 
@@ -21,6 +21,7 @@ function emit(msg) {
 
 let onStatusFn = null;
 let onFlash = null;
+let onLocalFn = null;
 
 // 结果写到输出。flash 是状态栏上停留几秒的短句。
 function note(msg, flash) {
@@ -127,24 +128,31 @@ function cmdSyncKeilTree() {
   });
 }
 
-function cmdSaveConfigOverlay() {
-  const repo = requireInstalled();
-  const r = seedOverlay(repo);
-  r.seeded.forEach((f) => emit('  ' + f));
-  note('已保存 ' + r.seeded.length + ' 个本地配置', 'native');
-  return r;
-}
-
-function cmdRestoreConfigOverlay() {
-  const repo = requireInstalled();
-  const r = restoreOverlay(repo);
-  note('已还原 ' + r.restored.length + ' 个本地配置', 'native');
-  return r;
+function cmdToggleLocal(extensionRoot) {
+  const repo = resolveRepo();
+  return withLock(repo, () => {
+    const settings = require('../../shared/zkz_settings');
+    const next = !isLocalInstalled(repo);
+    settings.set(repo, 'native', 'local', next);
+    if (!next) {
+      uninstallLocalConfig(repo);
+      note('本地配置已关闭', '本地配置 关');
+      if (onStatusFn) onStatusFn();
+      if (onLocalFn) onLocalFn();
+      return false;
+    }
+    installLocalConfig(repo, extensionRoot);
+    note('本地配置已打开', '本地配置 开');
+    if (onStatusFn) onStatusFn();
+    if (onLocalFn) onLocalFn();
+    return true;
+  });
 }
 
 function register(context, extensionRoot, hooks) {
   onStatusFn = typeof hooks === 'function' ? hooks : (hooks && hooks.onStatus);
   onFlash = hooks && hooks.onFlash;
+  onLocalFn = hooks && hooks.onLocal;
   const onStatus = onStatusFn;
   const onActive = hooks && hooks.onActive;
   const wrap = (fn) => async () => {
@@ -170,8 +178,7 @@ function register(context, extensionRoot, hooks) {
     })),
     vscode.commands.registerCommand('zkz-native.refreshTable', wrap(() => cmdRefresh(extensionRoot, onStatus))),
     vscode.commands.registerCommand('zkz-native.syncKeilTree', wrap(cmdSyncKeilTree)),
-    vscode.commands.registerCommand('zkz-native.saveConfigOverlay', wrap(cmdSaveConfigOverlay)),
-    vscode.commands.registerCommand('zkz-native.restoreConfigOverlay', wrap(cmdRestoreConfigOverlay))
+    vscode.commands.registerCommand('zkz-native.toggleLocalConfig', wrap(() => cmdToggleLocal(extensionRoot)))
   );
 }
 

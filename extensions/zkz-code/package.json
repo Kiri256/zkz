@@ -2,7 +2,7 @@
   "name": "zkz-code",
   "displayName": "zkz Code",
   "description": "yt_version macros, inactive #if folding, and clangd index.",
-  "version": "0.0.57",
+  "version": "0.0.58",
   "publisher": "zkz",
   "icon": "media/zkz-code.png",
   "engines": {

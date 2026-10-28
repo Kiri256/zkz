@@ -6,6 +6,7 @@ const path = require('path');
 const DEFAULTS = {
   native: {
     enabled: true,
+    local: false,
     glob: '*.c,*.h',
     paths: [
       ".cursor",

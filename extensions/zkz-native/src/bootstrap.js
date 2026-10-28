@@ -172,7 +172,7 @@ async function enable(repoRoot, extensionRoot, opts) {
 
 function disable(repoRoot) {
   uninstallGitConfig(repoRoot);
-  uninstallHooks(repoRoot);
+  if (!require('./git_config').isLocalInstalled(repoRoot)) uninstallHooks(repoRoot);
   const r = restoreOriginalStale(repoRoot);
   return { installed: false, restored: r.checked, leftover: r.leftover };
 }

@@ -3,3 +3,4 @@ _archive_tmp
 __pycache__
 *.vsix
 .vscode
+extensions/zkz-native/bin/

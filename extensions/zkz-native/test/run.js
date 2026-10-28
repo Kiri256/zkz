@@ -846,41 +846,12 @@ test('roundtrip status ignores removed paths without deleting historical records
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('config overlay seed/restore across branch loss', () => {
-  const os = require('os');
-  const path = require('path');
-  const fs = require('fs');
-  const { seedOverlay, restoreOverlay, overlaySeeded } = require('../src/overlay');
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-overlay-'));
-  try {
-    fs.mkdirSync(path.join(root, '.vscode'), { recursive: true });
-    const cfg = path.join(root, '.vscode', 'settings.json');
-    fs.writeFileSync(cfg, '{ "local": true }', 'utf8');
-    const { overlayDrift } = require('../src/overlay');
-    assert.strictEqual(overlayDrift(root), 'missing');
-    assert.ok(!overlaySeeded(root));
-    assert.ok(seedOverlay(root).seeded.indexOf('.vscode/settings.json') >= 0);
-    assert.ok(overlaySeeded(root));
-    assert.strictEqual(overlayDrift(root), 'same');
-    fs.writeFileSync(cfg, '{ "local": false }', 'utf8');
-    assert.strictEqual(overlayDrift(root), 'changed');
-    fs.writeFileSync(cfg, '{ "local": true }', 'utf8');
-    assert.strictEqual(overlayDrift(root), 'same');
-    fs.unlinkSync(cfg);
-    assert.ok(restoreOverlay(root).restored.indexOf('.vscode/settings.json') >= 0);
-    assert.strictEqual(fs.readFileSync(cfg, 'utf8'), '{ "local": true }');
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('config_paths merge lists for overlay save/restore', () => {
+test('config_paths merges the old list into settings', () => {
   const os = require('os');
   const path = require('path');
   const fs = require('fs');
   const { atomicWriteJson, configPathsFile } = require('../src/paths');
   const { loadConfigPaths } = require('../src/config_paths');
-  const { seedOverlay, restoreOverlay } = require('../src/overlay');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-cfgp-'));
   try {
     atomicWriteJson(configPathsFile(root), {
@@ -896,66 +867,6 @@ test('config_paths merge lists for overlay save/restore', () => {
     assert.ok(cfg.overlay.indexOf('.vscode') >= 0);
     assert.ok(cfg.overlay.indexOf('AGENTS.md') >= 0);
     assert.ok(cfg.skipWorktree.indexOf('.cursor') >= 0);
-    fs.mkdirSync(path.join(root, '.cursor', 'rules'), { recursive: true });
-    fs.mkdirSync(path.join(root, '.vscode'), { recursive: true });
-    fs.writeFileSync(path.join(root, '.cursor', 'rules', 'a.mdc'), 'rule', 'utf8');
-    fs.writeFileSync(path.join(root, '.vscode', 'settings.json'), '{}\n', 'utf8');
-    fs.writeFileSync(path.join(root, 'AGENTS.md'), 'agents', 'utf8');
-    const seeded = seedOverlay(root).seeded;
-    assert.ok(seeded.indexOf('.cursor/rules/a.mdc') >= 0);
-    assert.ok(seeded.indexOf('.vscode/settings.json') >= 0);
-    assert.ok(seeded.indexOf('AGENTS.md') >= 0);
-    fs.unlinkSync(path.join(root, '.cursor', 'rules', 'a.mdc'));
-    fs.unlinkSync(path.join(root, 'AGENTS.md'));
-    fs.writeFileSync(path.join(root, '.cursor', 'extra.txt'), 'extra', 'utf8');
-    fs.writeFileSync(path.join(root, '.vscode', 'extra.json'), 'extra', 'utf8');
-    const restored = restoreOverlay(root).restored;
-    assert.ok(restored.indexOf('.cursor/rules/a.mdc') >= 0);
-    assert.ok(restored.indexOf('AGENTS.md') >= 0);
-    assert.strictEqual(fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8'), 'agents');
-    assert.ok(fs.existsSync(path.join(root, '.cursor', 'rules', 'a.mdc')));
-    assert.ok(!fs.existsSync(path.join(root, '.cursor', 'extra.txt')));
-    assert.ok(!fs.existsSync(path.join(root, '.vscode', 'extra.json')));
-    assert.strictEqual(fs.readFileSync(path.join(root, '.vscode', 'settings.json'), 'utf8'), '{}\n');
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('restore keeps directories and gitkeep files', () => {
-  const os = require('os');
-  const path = require('path');
-  const fs = require('fs');
-  const { atomicWriteJson, configPathsFile } = require('../src/paths');
-  const { seedOverlay, restoreOverlay } = require('../src/overlay');
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-keep-'));
-  try {
-    atomicWriteJson(configPathsFile(root), { paths: ['.cursor'] });
-    fs.mkdirSync(path.join(root, '.cursor', 'rules'), { recursive: true });
-    fs.writeFileSync(path.join(root, '.cursor', 'rules', 'a.mdc'), 'rule', 'utf8');
-    seedOverlay(root);
-    const commands = path.join(root, '.cursor', 'commands');
-    const nested = path.join(commands, 'nested');
-    fs.mkdirSync(nested, { recursive: true });
-    fs.writeFileSync(path.join(commands, '.gitkeep'), '', 'utf8');
-    fs.writeFileSync(path.join(commands, 'gitkeep'), 'plain', 'utf8');
-    fs.writeFileSync(path.join(commands, 'old.md'), 'gone', 'utf8');
-    fs.writeFileSync(path.join(nested, 'x.txt'), 'gone', 'utf8');
-    fs.writeFileSync(path.join(nested, '.gitkeep'), '', 'utf8');
-    fs.mkdirSync(path.join(root, '.cursor', 'emptyish'), { recursive: true });
-    fs.writeFileSync(path.join(root, '.cursor', 'emptyish', 'only.txt'), 'gone', 'utf8');
-    fs.unlinkSync(path.join(root, '.cursor', 'rules', 'a.mdc'));
-    restoreOverlay(root);
-    assert.strictEqual(fs.readFileSync(path.join(root, '.cursor', 'rules', 'a.mdc'), 'utf8'), 'rule');
-    assert.ok(fs.existsSync(commands));
-    assert.ok(fs.existsSync(nested));
-    assert.ok(fs.existsSync(path.join(root, '.cursor', 'emptyish')));
-    assert.ok(fs.existsSync(path.join(commands, '.gitkeep')));
-    assert.strictEqual(fs.readFileSync(path.join(commands, 'gitkeep'), 'utf8'), 'plain');
-    assert.ok(fs.existsSync(path.join(nested, '.gitkeep')));
-    assert.ok(!fs.existsSync(path.join(commands, 'old.md')));
-    assert.ok(!fs.existsSync(path.join(nested, 'x.txt')));
-    assert.ok(!fs.existsSync(path.join(root, '.cursor', 'emptyish', 'only.txt')));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -1810,6 +1721,483 @@ test('library attributes cancel -text so autocrlf still applies', () => {
   assert.ok(body.indexOf('output.hex') < 0);
 });
 
+test('skip-worktree hides a longer local edit and pre-commit keeps the HEAD blob', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { installLocalConfig, uninstallLocalConfig } = require('../src/git_config');
+  const { keepCommitBlob, stopLocalWatch } = require('../src/local_filter');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-local-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: root, windowsHide: true, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+    return String(r.stdout || '').trim();
+  };
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'true']);
+    fs.mkdirSync(path.join(root, '.zkz'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.zkz', 'settings.json'), JSON.stringify({
+      native: { paths: ['keep.txt', 'fresh.txt'] }
+    }));
+    const file = path.join(root, 'keep.txt');
+    fs.writeFileSync(file, 'git-version\r\n');
+    git(['add', '--', 'keep.txt']);
+    git(['commit', '-q', '-m', 'add']);
+    const oid = git(['rev-parse', 'HEAD:keep.txt']);
+    installLocalConfig(root, path.join(__dirname, '..'));
+    fs.writeFileSync(file, 'git-version\r\nlocal-line\r\n');
+    fs.writeFileSync(path.join(root, 'extra.txt'), 'no\n');
+    fs.writeFileSync(path.join(root, 'fresh.txt'), 'new\n');
+    assert.strictEqual(git(['status', '--porcelain', '--', 'keep.txt']), '');
+    assert.ok(git(['ls-files', '-v', '--', 'keep.txt']).startsWith('S '));
+    assert.strictEqual(git(['rev-parse', ':keep.txt']), oid);
+    assert.ok(git(['status', '--porcelain', '--', 'extra.txt']).indexOf('??') >= 0);
+    git(['update-index', '--no-skip-worktree', '--', 'keep.txt']);
+    git(['add', '--', 'keep.txt', 'extra.txt', 'fresh.txt']);
+    assert.deepStrictEqual(keepCommitBlob(root).slice().sort(), ['fresh.txt', 'keep.txt']);
+    assert.strictEqual(git(['diff', '--cached', '--name-only', '--', 'keep.txt']), '');
+    assert.strictEqual(git(['rev-parse', ':keep.txt']), oid);
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), 'git-version\r\nlocal-line\r\n');
+    assert.ok(git(['diff', '--cached', '--name-only', '--', 'extra.txt']).indexOf('extra.txt') >= 0);
+  } finally {
+    try { uninstallLocalConfig(root); } catch (_) { stopLocalWatch(root); }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('native.local adopts the current switch and a later false turns it off', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { applyLocalSwitch, isLocalInstalled, uninstallLocalConfig } = require('../src/git_config');
+  const { stopLocalWatch } = require('../src/local_filter');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-local-switch-'));
+  const git = (args) => spawnSync('git', args, { cwd: root, windowsHide: true, encoding: 'utf8' });
+  const settingsFile = path.join(root, '.zkz', 'settings.json');
+  try {
+    assert.strictEqual(git(['init', '-q']).status, 0);
+    fs.mkdirSync(path.join(root, '.zkz'), { recursive: true });
+    fs.writeFileSync(settingsFile, JSON.stringify({ native: { paths: ['AGENTS.md'] } }));
+    git(['config', '--local', 'zkz.localconfig', 'true']);
+    applyLocalSwitch(root, path.join(__dirname, '..'));
+    const stored = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+    assert.strictEqual(stored.native.local, true);
+    assert.ok(isLocalInstalled(root));
+    stored.native.local = false;
+    fs.writeFileSync(settingsFile, JSON.stringify(stored));
+    applyLocalSwitch(root, path.join(__dirname, '..'));
+    assert.strictEqual(JSON.parse(fs.readFileSync(settingsFile, 'utf8')).native.local, false);
+    assert.ok(!isLocalInstalled(root));
+  } finally {
+    try { uninstallLocalConfig(root); } catch (_) { stopLocalWatch(root); }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('local config switch reads native.paths and leaves the encoding block', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { installLocalConfig, uninstallLocalConfig, isLocalInstalled } = require('../src/git_config');
+  const { stopLocalWatch } = require('../src/local_filter');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-local-attr-'));
+  const git = (args) => spawnSync('git', args, { cwd: root, windowsHide: true, encoding: 'utf8' });
+  try {
+    assert.strictEqual(git(['init', '-q']).status, 0);
+    assert.strictEqual(git(['config', 'user.email', 'a@b.c']).status, 0);
+    assert.strictEqual(git(['config', 'user.name', 't']).status, 0);
+    fs.mkdirSync(path.join(root, '.zkz'), { recursive: true });
+    fs.mkdirSync(path.join(root, '.vscode'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.vscode', 'settings.json'), 'local-settings\n');
+    fs.writeFileSync(path.join(root, 'AGENTS.md'), 'tracked\n');
+    assert.strictEqual(git(['add', '--', 'AGENTS.md']).status, 0);
+    assert.strictEqual(git(['commit', '-q', '-m', 'add']).status, 0);
+    fs.writeFileSync(path.join(root, '.zkz', 'settings.json'), JSON.stringify({
+      native: { paths: ['.vscode', 'AGENTS.md'] }
+    }));
+    const info = path.join(root, '.git', 'info');
+    fs.mkdirSync(info, { recursive: true });
+    const attr = path.join(info, 'attributes');
+    fs.writeFileSync(attr, '# >>> zkz-native\n*.c filter=zkznative diff=zkznative -text\n# <<< zkz-native\n# >>> zkz-local\nAGENTS.md filter=zkzlocal -text\n# <<< zkz-local\n');
+    git(['config', '--local', 'filter.zkzlocal.process', 'old']);
+    git(['config', '--local', 'filter.zkzlocal.required', 'true']);
+    installLocalConfig(root, path.join(__dirname, '..'));
+    const text = fs.readFileSync(attr, 'utf8');
+    assert.ok(text.indexOf('*.c filter=zkznative diff=zkznative -text') >= 0);
+    assert.ok(text.indexOf('zkz-local') < 0);
+    assert.ok(text.indexOf('zkzlocal') < 0);
+    assert.ok(isLocalInstalled(root));
+    assert.strictEqual(String(git(['config', '--local', '--get', 'zkz.localconfig']).stdout || '').trim(), 'true');
+    assert.strictEqual(git(['config', '--local', '--get', 'filter.zkzlocal.process']).status, 1);
+    assert.strictEqual(fs.existsSync(path.join(root, '.zkz', 'local', '.vscode', 'settings.json')), false);
+    assert.ok(String(git(['ls-files', '-v', '--', 'AGENTS.md']).stdout || '').startsWith('S '));
+    const exclude = fs.readFileSync(path.join(info, 'exclude'), 'utf8');
+    assert.ok(exclude.indexOf('.zkz/local/') >= 0);
+    assert.ok(exclude.indexOf('AGENTS.md') < 0);
+    assert.ok(exclude.indexOf('.vscode') < 0);
+    const hook = fs.readFileSync(path.join(root, '.git', 'hooks', 'pre-commit'), 'utf8');
+    assert.ok(hook.indexOf('hook_runner.js') >= 0);
+    uninstallLocalConfig(root);
+    const left = fs.readFileSync(attr, 'utf8');
+    assert.ok(left.indexOf('*.c filter=zkznative') >= 0);
+    assert.ok(left.indexOf('zkz-local') < 0);
+    assert.ok(!isLocalInstalled(root));
+    assert.ok(!String(git(['ls-files', '-v', '--', 'AGENTS.md']).stdout || '').startsWith('S '));
+  } finally {
+    try { uninstallLocalConfig(root); } catch (_) { stopLocalWatch(root); }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('shim writes back a listed file the other commit deletes', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { installLocalConfig, uninstallLocalConfig } = require('../src/git_config');
+  const { stopLocalWatch } = require('../src/local_filter');
+  const { ensureGitShim } = require('../src/git_shim');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-local-keep-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: root, windowsHide: true, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+    return String(r.stdout || '').trim();
+  };
+  const exe = ensureGitShim(path.join(__dirname, '..'));
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'false']);
+    fs.mkdirSync(path.join(root, '.zkz'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.zkz', 'settings.json'), JSON.stringify({
+      native: { paths: ['keep.txt'] }
+    }));
+    const file = path.join(root, 'keep.txt');
+    fs.writeFileSync(file, 'git-version\n');
+    git(['add', '--', 'keep.txt']);
+    git(['commit', '-q', '-m', 'add']);
+    git(['checkout', '-q', '-b', 'drop']);
+    git(['rm', '-q', '--', 'keep.txt']);
+    git(['commit', '-q', '-m', 'drop']);
+    git(['checkout', '-q', '-']);
+    installLocalConfig(root, path.join(__dirname, '..'));
+    fs.writeFileSync(file, 'edited\n');
+    const stamp = new Date('2020-01-15T08:00:00Z');
+    fs.utimesSync(file, stamp, stamp);
+    const switched = spawnSync(exe, ['checkout', '-q', 'drop'], { cwd: root, encoding: 'utf8' });
+    assert.strictEqual(switched.status, 0, String(switched.stderr || switched.stdout));
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), 'edited\n');
+    assert.ok(Math.abs(fs.statSync(file).mtimeMs - stamp.getTime()) < 2000);
+    const perf = fs.readFileSync(path.join(root, '.zkz', 'run', 'performance.jsonl'), 'utf8').trim().split(/\n/).map(JSON.parse);
+    const prep = perf.filter(function (row) { return row.phase === 'zkz-native.localConfig' && row.step === 'prepare'; });
+    const back = perf.filter(function (row) { return row.phase === 'zkz-native.localConfig' && row.step === 'restore'; });
+    assert.strictEqual(prep.length, 1);
+    assert.strictEqual(back.length, 1);
+    assert.strictEqual(prep[0].command, 'checkout');
+    assert.strictEqual(prep[0].moved, 1);
+    assert.strictEqual(prep[0].copied, 0);
+    assert.strictEqual(back[0].moved, 1);
+    assert.strictEqual(back[0].fallback, 0);
+    assert.ok(prep[0].ms >= 0 && back[0].ms >= 0);
+    assert.strictEqual(git(['ls-files', '--', 'keep.txt']), '');
+    assert.ok(git(['status', '--porcelain', '--', 'keep.txt']).indexOf('??') >= 0);
+  } finally {
+    try { uninstallLocalConfig(root); } catch (_) { stopLocalWatch(root); }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('shim drops listed files that only exist on the other branch', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { installLocalConfig, uninstallLocalConfig } = require('../src/git_config');
+  const { stopLocalWatch } = require('../src/local_filter');
+  const { ensureGitShim } = require('../src/git_shim');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-local-extra-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: root, windowsHide: true, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+    return String(r.stdout || '').trim();
+  };
+  const exe = ensureGitShim(path.join(__dirname, '..'));
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'false']);
+    fs.mkdirSync(path.join(root, '.zkz'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.zkz', 'settings.json'), JSON.stringify({
+      native: { paths: ['keep'] }
+    }));
+    fs.mkdirSync(path.join(root, 'keep'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'keep', 'a.txt'), 'local-a\n');
+    git(['add', '--', 'keep/a.txt']);
+    git(['commit', '-q', '-m', 'a']);
+    git(['checkout', '-q', '-b', 'other']);
+    fs.writeFileSync(path.join(root, 'keep', 'a.txt'), 'other-a\n');
+    fs.writeFileSync(path.join(root, 'keep', 'b.txt'), 'other-b\n');
+    fs.writeFileSync(path.join(root, 'keep', 'c.txt'), 'other-c\n');
+    git(['add', '--', 'keep/a.txt', 'keep/b.txt', 'keep/c.txt']);
+    git(['commit', '-q', '-m', 'b']);
+    git(['checkout', '-q', '-']);
+    installLocalConfig(root, path.join(__dirname, '..'));
+    fs.writeFileSync(path.join(root, 'keep', 'a.txt'), 'edited-a\n');
+    fs.writeFileSync(path.join(root, 'keep', 'mine.txt'), 'untracked\n');
+    fs.writeFileSync(path.join(root, 'keep', 'c.txt'), 'mine-c\n');
+    const switched = spawnSync(exe, ['checkout', '-q', 'other'], { cwd: root, encoding: 'utf8' });
+    assert.strictEqual(switched.status, 0, String(switched.stderr || switched.stdout));
+    assert.strictEqual(fs.readFileSync(path.join(root, 'keep', 'a.txt'), 'utf8'), 'edited-a\n');
+    assert.strictEqual(fs.existsSync(path.join(root, 'keep', 'b.txt')), false);
+    assert.strictEqual(fs.readFileSync(path.join(root, 'keep', 'mine.txt'), 'utf8'), 'untracked\n');
+    assert.strictEqual(fs.readFileSync(path.join(root, 'keep', 'c.txt'), 'utf8'), 'mine-c\n');
+    assert.strictEqual(git(['status', '--porcelain', '--', 'keep']), '?? keep/mine.txt');
+    assert.strictEqual(fs.existsSync(path.join(root, '.zkz', 'local', 'keep', 'a.txt')), false);
+  } finally {
+    try { uninstallLocalConfig(root); } catch (_) { stopLocalWatch(root); }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('reapplying skip-worktree does not write the sidecar over a checkout', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { installLocalConfig, uninstallLocalConfig } = require('../src/git_config');
+  const { applySkipWorktree, stopLocalWatch } = require('../src/local_filter');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-local-co-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: root, windowsHide: true, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+    return String(r.stdout || '').trim();
+  };
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'false']);
+    fs.mkdirSync(path.join(root, '.zkz'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.zkz', 'settings.json'), JSON.stringify({
+      native: { paths: ['keep.txt'] }
+    }));
+    const file = path.join(root, 'keep.txt');
+    fs.writeFileSync(file, 'branch-a\n');
+    git(['add', '--', 'keep.txt']);
+    git(['commit', '-q', '-m', 'a']);
+    const baseName = git(['branch', '--show-current']);
+    git(['checkout', '-q', '-b', 'other']);
+    fs.writeFileSync(file, 'branch-b\n');
+    git(['add', '--', 'keep.txt']);
+    git(['commit', '-q', '-m', 'b']);
+    installLocalConfig(root, path.join(__dirname, '..'));
+    git(['checkout', '-q', baseName]);
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), 'branch-a\n');
+    applySkipWorktree(root);
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), 'branch-a\n');
+    assert.ok(git(['ls-files', '-v', '--', 'keep.txt']).startsWith('S '));
+  } finally {
+    try { uninstallLocalConfig(root); } catch (_) { stopLocalWatch(root); }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('shim path detector matches any installed extension bin', () => {
+  const { isShimGitExe, isShimBin } = require('../src/git_shim');
+  assert.strictEqual(isShimGitExe('C:/Users/Administrator/.cursor/extensions/zkz.zkz-native-0.0.83/bin/git.exe'), true);
+  assert.strictEqual(isShimGitExe('C:\\Users\\Administrator\\.cursor\\extensions\\zkz.zkz-native-0.0.84\\bin\\git.exe'), true);
+  assert.strictEqual(isShimGitExe('D:/ruanjian/Git/cmd/git.exe'), false);
+  assert.strictEqual(isShimBin('C:/Users/Administrator/.cursor/extensions/zkz.zkz-native-0.0.83/bin'), true);
+  assert.strictEqual(isShimBin('C:/Users/Administrator/.cursor/extensions/zkz.zkz-native-0.0.83/bin/'), true);
+  assert.strictEqual(isShimBin('D:/ruanjian/Git/cmd'), false);
+});
+
+test('git invocation parser skips global options', () => {
+  const { parseGitInvocation, wrapsCommand, wrapsInvocation } = require('../src/git_shim');
+  const parsed = parseGitInvocation(['-c', 'a.b=c', '-C', 'repo', 'checkout', 'main']);
+  assert.strictEqual(parsed.command, 'checkout');
+  assert.strictEqual(parsed.cdir, 'repo');
+  assert.strictEqual(wrapsCommand('status'), false);
+  assert.strictEqual(wrapsCommand('pull'), true);
+  assert.strictEqual(wrapsCommand('rebase'), true);
+  assert.strictEqual(wrapsCommand('cherry-pick'), true);
+  assert.strictEqual(wrapsCommand('revert'), true);
+  assert.strictEqual(wrapsCommand('reset'), false);
+  assert.strictEqual(wrapsInvocation(['reset']), false);
+  assert.strictEqual(wrapsInvocation(['reset', '--soft', 'HEAD']), false);
+  assert.strictEqual(wrapsInvocation(['reset', 'HEAD']), false);
+  assert.strictEqual(wrapsInvocation(['-C', 'repo', 'reset', '-q', '--hard']), true);
+  assert.strictEqual(wrapsInvocation(['reset', '--merge', 'other']), true);
+  assert.strictEqual(wrapsInvocation(['reset', '--keep']), true);
+  assert.strictEqual(wrapsInvocation(['reset', '--', 'keep.txt']), false);
+  assert.strictEqual(wrapsInvocation(['restore', '--worktree', '--', 'keep.txt']), false);
+  assert.strictEqual(wrapsInvocation(['commit', '-m', 'x']), false);
+});
+
+test('git shim reset --hard keeps a listed file and resets the others', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { installLocalConfig, uninstallLocalConfig } = require('../src/git_config');
+  const { stopLocalWatch } = require('../src/local_filter');
+  const { ensureGitShim } = require('../src/git_shim');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-shim-reset-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: root, windowsHide: true, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+    return String(r.stdout || '').trim();
+  };
+  const exe = ensureGitShim(path.join(__dirname, '..'));
+  const keep = path.join(root, 'keep.txt');
+  const other = path.join(root, 'other.txt');
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'false']);
+    fs.mkdirSync(path.join(root, '.zkz'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.zkz', 'settings.json'), JSON.stringify({ native: { paths: ['keep.txt'] } }));
+    fs.writeFileSync(keep, 'base\n');
+    fs.writeFileSync(other, 'a\n');
+    git(['add', '--', 'keep.txt', 'other.txt']);
+    git(['commit', '-q', '-m', 'base']);
+    const main = git(['branch', '--show-current']);
+    const base = git(['rev-parse', 'HEAD']);
+    git(['checkout', '-q', '-b', 'other']);
+    fs.writeFileSync(keep, 'branch-b\n');
+    fs.writeFileSync(other, 'b\n');
+    git(['add', '--', 'keep.txt', 'other.txt']);
+    git(['commit', '-q', '-m', 'b']);
+    git(['checkout', '-q', main]);
+    installLocalConfig(root, path.join(__dirname, '..'));
+    fs.writeFileSync(keep, 'local-edit-long\n');
+    const before = fs.statSync(keep).mtimeMs;
+    const soft = spawnSync(exe, ['reset', '--soft', 'HEAD'], { cwd: root, encoding: 'utf8' });
+    assert.strictEqual(soft.status, 0, String(soft.stderr || soft.stdout));
+    assert.strictEqual(fs.readFileSync(keep, 'utf8'), 'local-edit-long\n');
+    assert.strictEqual(fs.statSync(keep).mtimeMs, before);
+    fs.writeFileSync(other, 'dirty\n');
+    const hard = spawnSync(exe, ['reset', '--hard'], { cwd: root, encoding: 'utf8' });
+    assert.strictEqual(hard.status, 0, String(hard.stderr || hard.stdout));
+    assert.strictEqual(fs.readFileSync(keep, 'utf8'), 'local-edit-long\n');
+    assert.strictEqual(fs.readFileSync(other, 'utf8'), 'a\n');
+    assert.ok(git(['ls-files', '-v', '--', 'keep.txt']).startsWith('S '));
+    assert.strictEqual(fs.existsSync(path.join(root, '.zkz', 'local', 'keep.txt')), false);
+    const merged = spawnSync(exe, ['reset', '--merge', 'other'], { cwd: root, encoding: 'utf8' });
+    assert.strictEqual(merged.status, 0, String(merged.stderr || merged.stdout));
+    assert.strictEqual(fs.readFileSync(keep, 'utf8'), 'local-edit-long\n');
+    assert.strictEqual(fs.readFileSync(other, 'utf8'), 'b\n');
+    const kept = spawnSync(exe, ['reset', '--keep', base], { cwd: root, encoding: 'utf8' });
+    assert.strictEqual(kept.status, 0, String(kept.stderr || kept.stdout));
+    assert.strictEqual(fs.readFileSync(keep, 'utf8'), 'local-edit-long\n');
+    assert.strictEqual(fs.readFileSync(other, 'utf8'), 'a\n');
+    assert.strictEqual(git(['rev-parse', 'HEAD']), base);
+    assert.strictEqual(git(['branch', '--show-current']), main);
+    assert.strictEqual(fs.existsSync(path.join(root, '.zkz', 'local', 'keep.txt')), false);
+  } finally {
+    try { uninstallLocalConfig(root); } catch (_) { stopLocalWatch(root); }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('git shim switches a longer local edit and writes it back', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { installLocalConfig, uninstallLocalConfig } = require('../src/git_config');
+  const { stopLocalWatch } = require('../src/local_filter');
+  const { ensureGitShim } = require('../src/git_shim');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-shim-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: root, windowsHide: true, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+    return String(r.stdout || '').trim();
+  };
+  const exe = ensureGitShim(path.join(__dirname, '..'));
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'false']);
+    fs.mkdirSync(path.join(root, '.zkz'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.zkz', 'settings.json'), JSON.stringify({
+      native: { paths: ['keep.txt'] }
+    }));
+    const file = path.join(root, 'keep.txt');
+    fs.writeFileSync(file, 'branch-a\n');
+    git(['add', '--', 'keep.txt']);
+    git(['commit', '-q', '-m', 'a']);
+    const baseName = git(['branch', '--show-current']);
+    const baseOid = git(['rev-parse', 'HEAD:keep.txt']);
+    git(['checkout', '-q', '-b', 'other']);
+    fs.writeFileSync(file, 'branch-b\n');
+    git(['add', '--', 'keep.txt']);
+    git(['commit', '-q', '-m', 'b']);
+    installLocalConfig(root, path.join(__dirname, '..'));
+    fs.writeFileSync(file, 'local-edit-long\n');
+    const switched = spawnSync(exe, ['checkout', '-q', baseName], { cwd: root, encoding: 'utf8' });
+    assert.strictEqual(switched.status, 0, String(switched.stderr || switched.stdout));
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), 'local-edit-long\n');
+    assert.strictEqual(git(['rev-parse', 'HEAD:keep.txt']), baseOid);
+    assert.strictEqual(git(['status', '--porcelain', '--', 'keep.txt']), '');
+    assert.ok(git(['ls-files', '-v', '--', 'keep.txt']).startsWith('S '));
+    const missing = spawnSync(exe, ['checkout', 'no-such-branch'], { cwd: root, encoding: 'utf8' });
+    assert.notStrictEqual(missing.status, 0);
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), 'local-edit-long\n');
+    const status = spawnSync(exe, ['status', '--porcelain', '--', 'keep.txt'], { cwd: root, encoding: 'utf8' });
+    assert.strictEqual(status.status, 0, String(status.stderr || ''));
+    assert.strictEqual(status.stdout, '');
+    assert.strictEqual(fs.existsSync(path.join(root, '.zkz', 'local', 'keep.txt')), false);
+  } finally {
+    try { uninstallLocalConfig(root); } catch (_) { stopLocalWatch(root); }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('same-branch commit changes refs/heads and not HEAD', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { refWatchPaths } = require('../src/git_exec');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-ref-watch-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: root, windowsHide: true, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+  };
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    const paths = refWatchPaths(root).map((p) => p.replace(/\\/g, '/'));
+    assert.ok(paths.some((p) => p.endsWith('/HEAD')));
+    assert.ok(paths.some((p) => p.endsWith('/refs/heads')));
+    fs.writeFileSync(path.join(root, 'a.txt'), 'a\n');
+    git(['add', '--', 'a.txt']);
+    git(['commit', '-q', '-m', 'a']);
+    const head = path.join(root, '.git', 'HEAD');
+    const before = fs.readFileSync(head);
+    const mtime = fs.statSync(head).mtimeMs;
+    fs.writeFileSync(path.join(root, 'a.txt'), 'b\n');
+    git(['add', '--', 'a.txt']);
+    git(['commit', '-q', '-m', 'b']);
+    assert.ok(fs.readFileSync(head).equals(before));
+    assert.strictEqual(fs.statSync(head).mtimeMs, mtime);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('keil-native preserves unmapped source encodings and worktree bytes', () => {
   const os = require('os');
   const fs = require('fs');
@@ -2102,6 +2490,18 @@ test('indexBlobOid matches staged git oids', () => {
     const rel = listed[i].slice(tab + 1).replace(/\\/g, '/');
     const oid = listed[i].slice(0, tab).split(' ')[1];
     assert.strictEqual(indexBlobOid(dir, rel), oid, rel);
+  }
+  git(['update-index', '--index-version', '4']);
+  assert.strictEqual(git(['update-index', '--show-index-version']).trim(), '4');
+  fs.writeFileSync(path.join(dir, 'User', 'new dir', 'b.c'), 'int b;\n');
+  git(['add', '--', 'User/new dir/b.c']);
+  const listedV4 = git(['ls-files', '-s', '-z']).split('\0').filter(Boolean);
+  assert.ok(listedV4.length >= 3);
+  for (let i = 0; i < listedV4.length; i++) {
+    const tab = listedV4[i].indexOf('\t');
+    const rel = listedV4[i].slice(tab + 1).replace(/\\/g, '/');
+    const oid = listedV4[i].slice(0, tab).split(' ')[1];
+    assert.strictEqual(indexBlobOid(dir, rel), oid, 'v4 ' + rel);
   }
   fs.rmSync(dir, { recursive: true, force: true });
 });

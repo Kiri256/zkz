@@ -70,6 +70,15 @@ function loadConfigPaths(repoRoot) {
   };
 }
 
+function matchesPrefix(rel, prefixes) {
+  const p = slashRel(rel);
+  for (const raw of prefixes) {
+    const pre = slashRel(raw);
+    if (p === pre || p.indexOf(pre.replace(/\/?$/, '/')) === 0) return true;
+  }
+  return false;
+}
+
 function saveConfigPaths(repoRoot, obj) {
   const paths = listsFromRaw(obj);
   settings.set(repoRoot, 'native', 'paths', paths.length ? paths : DEFAULT_PATHS.paths.slice());
@@ -82,5 +91,6 @@ function saveConfigPaths(repoRoot, obj) {
 module.exports = {
   DEFAULT_PATHS,
   loadConfigPaths,
-  saveConfigPaths
+  saveConfigPaths,
+  matchesPrefix
 };

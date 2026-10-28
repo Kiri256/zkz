@@ -5,7 +5,7 @@ const vscode = require('vscode');
 const { statusSnapshot, barLabel, statusLines, encodingActions } = require('./bootstrap');
 const commands = require('./commands');
 const { resolveRepo } = commands;
-const { isInstalled } = require('./git_config');
+const { isInstalled, isLocalInstalled } = require('./git_config');
 const { FILTER_FAIL_LIMIT, markFilterFailNotified } = require('./observe');
 
 // 左侧状态栏，数字越大越靠左。clangd 扩展自己是 10，后面依次 code 9、keil 8、native 7。
@@ -163,15 +163,24 @@ function create(context, opts) {
       });
     }
     items.push(sep('日常'));
-    items.push({ label: '启用', command: 'zkz-native.enable' });
-    items.push({ label: '关闭', command: 'zkz-native.disable' });
+    let filterOn = false;
+    try { filterOn = !!(repo && isInstalled(repo)); } catch (_) { filterOn = false; }
+    items.push({
+      label: filterOn ? '过滤器 开' : '过滤器 关',
+      command: filterOn ? 'zkz-native.disable' : 'zkz-native.enable',
+      description: '点击切换'
+    });
+    let localOn = false;
+    try { localOn = !!(repo && isLocalInstalled(repo)); } catch (_) { localOn = false; }
+    items.push({
+      label: localOn ? '本地配置 开' : '本地配置 关',
+      command: 'zkz-native.toggleLocalConfig',
+      description: '点击切换'
+    });
     items.push(sep('出了问题'));
     items.push({ label: '刷新编码表', command: 'zkz-native.refreshTable' });
     items.push({ label: '查看编不回的文件', action: 'list-open', files: actions.opens });
     items.push({ label: '同步编烧树', command: 'zkz-native.syncKeilTree' });
-    items.push(sep('很少用'));
-    items.push({ label: '保存本地配置', command: 'zkz-native.saveConfigOverlay' });
-    items.push({ label: '还原本地配置', command: 'zkz-native.restoreConfigOverlay' });
     const pick = await vscode.window.showQuickPick(items, {
       title: 'zkz-native',
       placeHolder: '选择要执行的命令'

@@ -120,8 +120,9 @@ function keilStampPath(repoRoot) {
   return runFile(repoRoot, 'keil-native-stamp.json');
 }
 
-function configOverlayRoot(repoRoot) {
-  return path.join(zkzDir(repoRoot), 'config-overlay');
+// 这次命令的临时副本，目录是 .zkz/local。命令结束就删。
+function localKeepRoot(repoRoot) {
+  return path.join(zkzDir(repoRoot), 'local');
 }
 
 function isSourceExt(filePath) {
@@ -401,7 +402,7 @@ module.exports = {
   configPathsFile,
   keilNativeRoot,
   keilStampPath,
-  configOverlayRoot,
+  localKeepRoot,
   isSourceExt,
   DEFAULT_LIB_TOPS,
   libTopNames,

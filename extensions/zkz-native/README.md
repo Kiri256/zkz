@@ -17,7 +17,7 @@
 
 编码表在本机 `.zkz/run/.workspace_source_encodings.json`（不进仓库），按路径决定每个文件怎么转。新文件第一次 clean 或同步编烧树时按当前编码登记：ASCII、UTF-8、UTF-8 BOM、GBK 均保留原字节（包括 BOM 和换行），不改工作区文件。UTF-8 新文件可以包含 GBK 无法表示的字符。后续提交和编烧树同步按登记的编码处理；已有文件仍按原编码表处理。
 
-`native.enabled`、`native.glob` 写在 `.zkz/settings.json`。过滤器开或关以本机 git 配置为准（`zkz-native.enable` / `disable`）。
+`native.enabled`、`native.glob`、`native.local` 写在 `.zkz/settings.json`。过滤器开或关以本机 git 配置为准（`zkz-native.enable` / `disable`）。`native.local` 是本地配置开关，扩展把它同步到本机 `zkz.localconfig`。没有这项时沿用当前开关，不因为补上默认值而关掉。
 
 ## 命令
 
@@ -27,16 +27,15 @@
 | `zkz-native.disable` | 卸 filter，按编码表把工作区编回原编码；未提交的修改保留 |
 | `zkz-native.refreshTable` | 按 HEAD 重建编码表 |
 | `zkz-native.syncKeilTree` | 把工作区 clean 到 `.zkz/keil-native/` |
-| `zkz-native.saveConfigOverlay` | 把 `.zkz/settings.json` 里 `native.paths` 列出的本机配置存成权威副本。切分支后，只在副本和工作区不一致时询问是否还原 |
-| `zkz-native.restoreConfigOverlay` | 立刻从权威副本还原上述全部路径；目录保留，只删其中除 `.gitkeep` / `gitkeep` 以外的文件 |
+| `zkz-native.toggleLocalConfig` | 开关本地配置。开着时，给 `.zkz/settings.json` 里 `native.paths` 的已跟踪路径打上 `skip-worktree`，更改里不出现工作区修改。替身在检出、拉取、合并、变基、拣选、还原，以及 `reset --hard`、`--merge`、`--keep` 开始时把这些路径改名挪进 `.zkz/local`，结束后删掉 Git 写出的再挪回来。改名失败才逐个复制。`pre-commit` 把这些路径的索引收回 HEAD 的 blob，不改工作区 |
 
-`.zkz/settings.json` 的 `native.paths` 只给手动的 overlay 保存/还原用。旧的 `.zkz/config_paths.json` 会在读取时并进这份名单后删除；其中的 `skipWorktree` / `overlay` / `forbidStage` 也会合并进来。这些文件按普通 Git 路径显示在更改里，不再 skip-worktree。提交不拦截本机文件。`.zkz/` 内部文件不进 overlay。
+`.zkz/settings.json` 的 `native.paths` 是本地配置名单。旧的 `.zkz/config_paths.json` 会在读取时并进这份名单后删除。开关记在本机 `zkz.localconfig`。开着时提交这些路径交出的是 HEAD 里的 blob，本机修改留在工作区。关掉之后，去掉 `skip-worktree`，差异重新出现在更改里。
 
-状态栏只显示 `native 开` 或 `native 关`。悬停是编码表和失败记录。调试 axf 由 `zkz-keil` 准备调试时从真源产物拷到 `.zkz/output.axf`。`git diff` / `git blame` 仍走 `textconv`，Git 自己把结果写入 `refs/notes/textconv/zkznative`。
+状态栏只显示 `native 开` 或 `native 关`。点开菜单后，编码过滤器是一条「过滤器 开 / 关」，点击切换。悬停是编码表和失败记录。调试 axf 由 `zkz-keil` 准备调试时从真源产物拷到 `.zkz/output.axf`。`git diff` / `git blame` 仍走 `textconv`，Git 自己把结果写入 `refs/notes/textconv/zkznative`。
 
-启用要求工作区干净。本地配置写在 `.git/info/attributes` 和 `.git/config`，不进仓库。filter 为 `required=true`：起不来时 git 会失败，这是为了避免把错误编码写进仓库。
+启用要求工作区干净。编码过滤器写在本机 `.git/info/attributes` 和 `.git/config`，不进仓库。`required=true`：起不来时 git 会失败，这是为了避免把错误编码写进仓库。本地配置只写本机 `zkz.localconfig`，不再占用 attributes。
 
-git hook 只保留 `pre-commit` / `pre-push`（挡坏提交/推送）。过滤器启用时，监视 `.git/HEAD` 的分支指向：换分支显示一条进度并刷新编码表，刷新失败才警告。本地配置只在权威副本和工作区不一致时询问是否还原；没有副本不询问，需要时用菜单「保存本地配置」。同分支上的提交和撤回不触发。过滤器关闭后不再监视分支、不刷表、不提示还原。不再走 `post-checkout` 等 hook。
+git hook 只保留 `pre-commit` / `pre-push`（挡坏提交/推送）。本地配置开着时，`pre-commit` 还会把名单路径的索引收回 HEAD 的 blob。编码过滤器或本地配置开着时监视 `.git/HEAD` 和 `refs/heads`。分支名变了才刷新编码表，同分支上的提交和撤回不刷表。HEAD 监视在提交或检出之后只重新打上 `skip-worktree`，不改文件内容。文件内容只由替身写回。检出、拉取、合并、变基、拣选、还原，以及 `reset --hard`、`--merge`、`--keep` 会先经过扩展目录里的 `git.exe`。它在命令开始时把名单文件收进 `.zkz/local`，让 Git 看到没改过，结束后写回并删掉。替身不放进仓库。`git.path` 和终端 PATH 写在用户设置里，指向当前扩展的 `bin`。关掉本地配置不改这两项。两个开关都关掉才停止监视。不再走 `post-checkout` 等 hook。本地配置开关和编码过滤器各自独立，切分支时不再询问还原。
 
 过滤器异常时运行 **zkz-native.disable** 即可卸掉（只改 `.git/config` 与 attributes，不依赖 filter 进程）。
 
@@ -77,7 +76,7 @@ stamp 的失效条件包括算法版本、HEAD、分支、编码映射内容和�
 
 库源文件也保留元数据快照，只在变化时检查编码。已有库告警会在其他文件更新及缓存命中时继续保留，修复对应库文件后清除。项目辅助文件每次重新枚举，能发现 Git 忽略的新增链接脚本。普通业务文件的新建仍遵循 Git ignore；已经复制的文件即使被忽略，后续修改和删除仍会检查。
 
-缓存正确性、冷启动与重复操作耗时的检查见源码仓库中的 `extensions/validation.md`（三个扩展验收指南）。性能数据 `.zkz/run/performance.jsonl` 当前记录编码表构建、编烧树同步及 compile_commands 生成，不记录每次 Git clean/smudge 耗时；Git 性能应单独计时。
+缓存正确性、冷启动与重复操作耗时的检查见源码仓库中的 `extensions/validation.md`（三个扩展验收指南）。性能数据 `.zkz/run/performance.jsonl` 当前记录编码表构建、编烧树同步、compile_commands 生成，以及本地配置替身的准备和恢复（`zkz-native.localConfig`）。不记录每次 Git clean/smudge 耗时；Git 性能应单独计时。
 
 编烧树日志增加 `gitListMs`、`sourceScanMs`、`targetCheckMs`，分别记录 Git 文件枚举、源文件元数据及项目扫描、目标文件元数据检查耗时；总 `ms` 还包含配置、链接处理、转码写入等开销。
 

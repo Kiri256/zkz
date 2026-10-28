@@ -25,12 +25,11 @@ native 覆盖编码识别、clean/smudge、真实 Git 过滤集成、编码表�
 | `disable` | 工作区恢复仓库编码与换行，Git 状态保持预期；再启用可以恢复 |
 | `refreshTable` | ASCII、GBK、UTF-8、UTF-8 BOM 与 CRLF 记录符合样本；新进程使用更新表 |
 | `syncKeilTree` | 业务源生成编烧字节，库使用链接；新增、修改、删除、重命名、撤销和切分支后结果正确 |
-| `saveConfigOverlay` | 本地配置保存到权威副本，保存范围符合配置名单 |
-| `restoreConfigOverlay` | 配置从副本恢复，目录和占位文件保留 |
+| `toggleLocalConfig` | 按 `.zkz/settings.json` 的 `native.paths` 给已跟踪路径打上或去掉 `skip-worktree`。工作区改长后 `git status` 不显示该文件，索引对象不变。暂存后 `pre-commit` 把索引收回 HEAD 的 blob，工作区仍是本机内容。切分支、拉取、合并、变基、拣选、还原，以及 `reset --hard`、`--merge`、`--keep` 走扩展目录里的 git 替身：开始时把清单路径改名挪进 `.zkz/local`，把磁盘写成索引内容，结束后删掉 Git 写出的再挪回来。改名失败才逐个复制。关掉后差异重新出现在更改里 |
 
-以上前缀为 `zkz-native.`。状态栏只显示 `native 开` 或 `native 关`；悬停显示编码表统计和失败记录，编不回的文件从菜单打开。调试 axf 由 `zkz-keil` 准备调试时拷到 `.zkz/output.axf`。检查 pre-commit/pre-push 在独立仓库中正确拦截编码不一致；GBK 无法往返时保留原内容并产生失败记录，不能让 Git 无响应。
+以上前缀为 `zkz-native.`。状态栏只显示 `native 开` 或 `native 关`；菜单里编码过滤器是一条「过滤器 开 / 关」，点击在 `enable` 与 `disable` 之间切换。悬停显示编码表统计和失败记录，编不回的文件从菜单打开。调试 axf 由 `zkz-keil` 准备调试时拷到 `.zkz/output.axf`。检查 pre-commit/pre-push 在独立仓库中正确拦截编码不一致；GBK 无法往返时保留原内容并产生失败记录，不能让 Git 无响应。
 
-自动事件：切分支后编码表刷新，hook 不同步编烧树；同分支提交与撤销不被当成切分支。编辑器重新获得焦点以及 HEAD 监视/轮询应能捕获外部切分支。
+自动事件：分支名变化后编码表刷新，hook 不同步编烧树；同分支提交与撤销不刷编码表。本地配置开着时，HEAD 变化后只重新打上 `skip-worktree`，不按副本改文件。编辑器重新获得焦点以及 HEAD 监视/轮询应能捕获外部切分支。
 
 ## zkz-code 命令
 
@@ -101,4 +100,4 @@ Get-Content .zkz/run/performance.jsonl -Tail 20
 
 干净 `git status` 通常不执行过滤，不能单独用它证明过滤速度提高。在独立仓库中用相同的一组源文件执行实际触发 clean 的 `git add`，以及触发 smudge 的文件恢复/检出，分别计时，并在每轮开始前重置相同测试状态。已有文件、新文件、GBK/UTF-8、CRLF 和库路径都要覆盖。
 
-性能日志目前覆盖编码表构建、编烧树同步与 compile_commands 生成，不记录每次 clean/smudge。编烧树观察 `cacheHit`、`written`、`skipped`、`dirty` 与 `ms`，并用 `gitListMs`、`sourceScanMs`、`targetCheckMs` 定位文件枚举、源元数据及项目扫描、目标存在检查开销；`dirty` 现在是相对上次同步元数据变化的路径数，不是 Git status 的修改数。编译数据库日志只有耗时、条目数、机型和 target。源文件 stat、目录检查和 Git 枚举仍有 I/O。
+性能日志目前覆盖编码表构建、编烧树同步、compile_commands 生成，以及本地配置替身。替身阶段名是 `zkz-native.localConfig`，`step` 为 `prepare` 或 `restore`，并带 `command`、`moved`、`copied`、`ms`。不记录每次 clean/smudge。编烧树观察 `cacheHit`、`written`、`skipped`、`dirty` 与 `ms`，并用 `gitListMs`、`sourceScanMs`、`targetCheckMs` 定位文件枚举、源元数据及项目扫描、目标存在检查开销；`dirty` 现在是相对上次同步元数据变化的路径数，不是 Git status 的修改数。编译数据库日志只有耗时、条目数、机型和 target。源文件 stat、目录检查和 Git 枚举仍有 I/O。
