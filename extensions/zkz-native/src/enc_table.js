@@ -1,12 +1,18 @@
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
 const { detectKind, encodeMapped, hasCrlf, parseMapped } = require('./encoding');
 const { slashRel, tablePath, ensureZkz, isLibRel, formatLocalNow, atomicWriteJson } = require('./paths');
 const { acquireLock, releaseLock } = require('./lock');
 const { listSourceFiles, catFileBatch, currentHead, readHeadName, git } = require('./git_exec');
 const { parseNameStatusZ } = require('./git_status');
-const { record: recordPerf } = require('../../shared/perf');
+// 源码树里在 extensions/shared，装进扩展后在 src/shared。
+function loadPerf() {
+  try { return require('../../shared/perf'); }
+  catch (_) { return require('./shared/perf'); }
+}
+const { record: recordPerf } = loadPerf();
 
 function emptyTable() {
   return Object.create(null);
@@ -164,13 +170,69 @@ function saveTable(repoRoot, files, extra) {
   }
 }
 
+const COMMIT_TABLE_LIMIT = 8;
+
+function commitOid(value) {
+  const oid = String(value || '').trim().toLowerCase();
+  return /^[0-9a-f]{40}$/.test(oid) ? oid : '';
+}
+
+function commitTablePath(repoRoot) {
+  return path.join(path.dirname(tablePath(repoRoot)), 'encoding-by-commit.json');
+}
+
+function readCommitTables(repoRoot) {
+  try {
+    const obj = JSON.parse(fs.readFileSync(commitTablePath(repoRoot), 'utf8'));
+    if (!obj || obj.version !== 1 || !obj.commits) return { version: 1, order: [], commits: {} };
+    if (!Array.isArray(obj.order)) obj.order = Object.keys(obj.commits);
+    return obj;
+  } catch (_) {
+    return { version: 1, order: [], commits: {} };
+  }
+}
+
+function copyFileMap(files) {
+  const out = emptyTable();
+  Object.keys(files || {}).forEach((k) => { out[slashRel(k)] = files[k]; });
+  return out;
+}
+
+// 同一个提交的编码结果留下。来回切分支时直接用，不再对整棵树重新 diff。
+function rememberCommitTable(repoRoot, head, files, includeLibs) {
+  const oid = commitOid(head);
+  if (!oid || !files) return;
+  try {
+    ensureZkz(repoRoot);
+    const obj = readCommitTables(repoRoot);
+    obj.order = obj.order.filter((item) => item !== oid);
+    obj.order.push(oid);
+    while (obj.order.length > COMMIT_TABLE_LIMIT) {
+      const drop = obj.order.shift();
+      if (drop) delete obj.commits[drop];
+    }
+    obj.commits[oid] = { includeLibs: !!includeLibs, files: copyFileMap(files) };
+    atomicWriteJson(commitTablePath(repoRoot), obj);
+  } catch (_) { /* 缓存写不上就下次再算 */ }
+}
+
+function recallCommitTable(repoRoot, head, includeLibs) {
+  const oid = commitOid(head);
+  if (!oid) return null;
+  const obj = readCommitTables(repoRoot);
+  const rec = obj.commits[oid];
+  if (!rec || !!rec.includeLibs !== !!includeLibs || !rec.files) return null;
+  return copyFileMap(rec.files);
+}
+
 function saveTableUnlocked(repoRoot, files, extra) {
   ensureZkz(repoRoot);
   const ordered = {};
   Object.keys(files).sort().forEach((k) => { ordered[slashRel(k)] = files[k]; });
+  const head = currentHead(repoRoot);
   const obj = Object.assign({
     version: 1,
-    head: currentHead(repoRoot),
+    head: head,
     ref: readHeadName(repoRoot),
     generatedAt: formatLocalNow(),
     files: ordered
@@ -259,15 +321,38 @@ async function buildTableBody(repoRoot, opts) {
   const perfStart = process.hrtime.bigint();
   const skipLib = !(opts && opts.includeLibs);
   const force = !!(opts && opts.force);
+  const includeLibs = !skipLib;
+  if (!force && opts && opts.from && opts.to && opts.from !== opts.to) {
+    const meta = loadMeta(repoRoot);
+    if (meta && commitOid(meta.head) && commitOid(meta.head) !== commitOid(opts.to)) {
+      rememberCommitTable(repoRoot, meta.head, loadTable(repoRoot), includeLibs);
+    }
+    const cached = recallCommitTable(repoRoot, opts.to, includeLibs);
+    if (cached) {
+      const metaHit = saveTableUnlocked(repoRoot, cached);
+      rememberCommitTable(repoRoot, opts.to, cached, includeLibs);
+      recordPerf(repoRoot, 'zkz-native.buildEncodingTable', {
+        ms: Number(process.hrtime.bigint() - perfStart) / 1e6,
+        files: Object.keys(cached).length,
+        incremental: true,
+        cacheHit: true,
+        includeLibs: includeLibs
+      });
+      return { files: cached, meta: metaHit, counts: countByKind(cached), incremental: true, cacheHit: true };
+    }
+  }
   if (!force && opts && opts.from && opts.to) {
     const hit = await buildTableIncremental(repoRoot, opts.from, opts.to, skipLib);
     if (hit) {
+      rememberCommitTable(repoRoot, opts.to || currentHead(repoRoot), hit.files, includeLibs);
       recordPerf(repoRoot, 'zkz-native.buildEncodingTable', {
         ms: Number(process.hrtime.bigint() - perfStart) / 1e6,
         files: Object.keys(hit.files || {}).length,
         incremental: true,
-        includeLibs: !skipLib
+        cacheHit: false,
+        includeLibs: includeLibs
       });
+      hit.cacheHit = false;
       return hit;
     }
   }
@@ -278,10 +363,12 @@ async function buildTableBody(repoRoot, opts) {
   const files = emptyTable();
   await fillKinds(repoRoot, files, paths);
   const meta = saveTableUnlocked(repoRoot, files);
+  rememberCommitTable(repoRoot, (opts && opts.to) || currentHead(repoRoot), files, includeLibs);
   recordPerf(repoRoot, 'zkz-native.buildEncodingTable', {
     ms: Number(process.hrtime.bigint() - perfStart) / 1e6,
     files: Object.keys(files).length,
     incremental: false,
+    cacheHit: false,
     includeLibs: !skipLib
   });
   return { files: files, meta: meta, counts: countByKind(files) };

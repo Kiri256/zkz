@@ -1603,6 +1603,45 @@ async function runAsync() {
 
   try {
     const { spawnSync } = require('child_process');
+    const { buildTable, loadTable } = require('../src/enc_table');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-table-cache-'));
+    const git = (args) => {
+      const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+      if (r.status !== 0) throw new Error(args.join(' ') + '\n' + (r.stderr || r.stdout));
+      return String(r.stdout || '').trim();
+    };
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'false']);
+    fs.writeFileSync(path.join(dir, 'a.c'), 'int a;\n');
+    git(['add', 'a.c']);
+    git(['commit', '-q', '-m', 'base']);
+    const base = git(['rev-parse', 'HEAD']);
+    const built = await buildTable(dir);
+    assert.strictEqual(built.cacheHit, undefined);
+    assert.ok(built.files['a.c']);
+    fs.writeFileSync(path.join(dir, 'b.c'), 'int b;\n');
+    git(['add', 'b.c']);
+    git(['commit', '-q', '-m', 'add']);
+    const added = git(['rev-parse', 'HEAD']);
+    const forward = await buildTable(dir, { from: base, to: added });
+    assert.strictEqual(forward.cacheHit, false);
+    assert.ok(forward.files['b.c']);
+    git(['checkout', '-q', base]);
+    const back = await buildTable(dir, { from: added, to: base });
+    assert.strictEqual(back.cacheHit, true);
+    assert.ok(back.files['a.c']);
+    assert.strictEqual(back.files['b.c'], undefined);
+    assert.strictEqual(loadTable(dir)['b.c'], undefined);
+    ok('encoding table reuses the map already built for that commit');
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch (e) {
+    fail('encoding table reuses the map already built for that commit', e);
+  }
+
+  try {
+    const { spawnSync } = require('child_process');
     const { encodeCp936, detectKind, decodeCp936 } = require('../src/encoding');
     const { saveTable, loadTable } = require('../src/enc_table');
     const { checkStaged } = require('../src/precommit');
@@ -2578,6 +2617,46 @@ test('disable restore keeps uncommitted edits in the original encoding', () => {
   assert.ok(git(['status', '--porcelain', '--', 'a.c']).indexOf('a.c') >= 0);
   assert.strictEqual(git(['diff', '--cached', '--numstat', '--', 'a.c']).trim(), '');
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('keil branch switch rewrites only files that changed', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { syncKeilTree } = require('../src/keil_tree');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-keil-branch-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: dir, windowsHide: true, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+  };
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'false']);
+    fs.mkdirSync(path.join(dir, 'User'));
+    fs.writeFileSync(path.join(dir, 'User', 'a.c'), 'int a;\n');
+    fs.writeFileSync(path.join(dir, 'User', 'b.c'), 'int b;\n');
+    fs.writeFileSync(path.join(dir, 'User', 'c.c'), 'int c;\n');
+    git(['add', 'User']);
+    git(['commit', '-q', '-m', 'base']);
+    syncKeilTree(dir);
+    git(['checkout', '-q', '-b', 'other']);
+    fs.writeFileSync(path.join(dir, 'User', 'b.c'), 'int changed;\n');
+    fs.unlinkSync(path.join(dir, 'User', 'c.c'));
+    git(['add', '-A', '--', 'User']);
+    git(['commit', '-q', '-m', 'edit']);
+    const switched = syncKeilTree(dir);
+    const kn = path.join(dir, '.zkz', 'keil-native', 'User');
+    assert.strictEqual(switched.written, 1);
+    assert.ok(switched.pruned >= 1);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'a.c'), 'utf8'), 'int a;\n');
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'b.c'), 'utf8'), 'int changed;\n');
+    assert.strictEqual(fs.existsSync(path.join(kn, 'c.c')), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('full keil sync copies root sources and skips gitignored files', () => {

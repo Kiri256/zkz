@@ -11,13 +11,19 @@ const {
 } = require('./paths');
 const { currentHead, currentBranch, gitText, git } = require('./git_exec');
 const { inspectLibEncoding, formatLibWarning, loadLibWarnings, saveLibWarnings } = require('./lib_encoding');
-const { record: recordPerf } = require('../../shared/perf');
+// 源码树里在 extensions/shared，装进扩展后在 src/shared。
+function loadPerf() {
+  try { return require('../../shared/perf'); }
+  catch (_) { return require('./shared/perf'); }
+}
+const { record: recordPerf } = loadPerf();
 
 const BUSINESS_FALLBACK = ['User', 'core', 'driver', 'application', 'fpga_motion', 'emWin'];
 const SKIP_DIR = new Set(DEFAULT_SKIP_DIR);
 const PROJECT_KEEP_EXT = ['.sct', '.ini', '.scf'];
 const SYNC_READY_FILE = '.zkz-sync-ready';
-const SYNC_VERSION = 4;
+// 5：分支或 HEAD 变化不再整棵重写。kinds 记下每个文件当时的编码，编码变了才重写那一个。
+const SYNC_VERSION = 5;
 
 function syncFingerprint(table, libraries) {
   return crypto.createHash('sha256').update(JSON.stringify([
@@ -163,8 +169,10 @@ function sourceSnapshot(repoRoot, stamp, isLibraryPath, topDirs) {
     if (current) (library ? libraryFiles : files)[rel] = current;
     if (current !== ((previous && previous[rel]) || '')) dirty.add(rel);
   }
-  return { files, libraryFiles, dirty, gitListMs,
-    sourceScanMs: Number(process.hrtime.bigint() - started) / 1e6 - gitListMs };
+  return {
+    files, libraryFiles, dirty, gitListMs,
+    sourceScanMs: Number(process.hrtime.bigint() - started) / 1e6 - gitListMs
+  };
 }
 
 function insideRepo(repoRoot, target) {
@@ -234,6 +242,7 @@ function syncOne(repoRoot, kn, table, stamp, nextStamp, rel, full, dirty, isLibr
   if (!st) {
     delete nextStamp.files[rel];
     delete nextStamp.targets[rel];
+    if (nextStamp.kinds) delete nextStamp.kinds[rel];
     try { if (fs.existsSync(dst) && fs.statSync(dst).isFile()) fs.unlinkSync(dst); } catch (_) { /* ignore */ }
     return 'pruned';
   }
@@ -244,6 +253,8 @@ function syncOne(repoRoot, kn, table, stamp, nextStamp, rel, full, dirty, isLibr
     return 'skipped';
   }
   writeSourceOrCopy(repoRoot, kn, table, rel, isLibraryPath);
+  // clean 会把识别出的编码写回这份 table。拷贝前 table 还是空的，提前记会变成空串，下次同步就把没改过的文件当成编码变了。
+  if (nextStamp.kinds) nextStamp.kinds[rel] = table[rel] || '';
   nextStamp.targets[rel] = fileStamp(dst);
   return 'written';
 }
@@ -293,7 +304,6 @@ function syncKeilTree(repoRoot, emit) {
   const isLibraryPath = createLibMatcher(repoRoot, true);
   const libraryTops = libTops(repoRoot);
   const libraries = [libTopNames(repoRoot).sort(), libraryTops.slice().sort()];
-  const fingerprint = syncFingerprint(table, libraries);
   const readyFile = path.join(kn, SYNC_READY_FILE);
   const stamp = readJson(keilStampPath(repoRoot), { files: {} });
   const topDirs = listTopDirs(repoRoot, libraryTops);
@@ -301,9 +311,14 @@ function syncKeilTree(repoRoot, emit) {
   const dirty = snapshot.dirty;
   const head = currentHead(repoRoot);
   const branch = currentBranch(repoRoot);
-  const full = stamp.version !== SYNC_VERSION || stamp.fingerprint !== fingerprint
-    || stamp.complete !== true || !fs.existsSync(readyFile)
-    || stamp.head !== head || stamp.branch !== branch || !stamp.files || !stamp.targets;
+  // 换分支只让 mtime 变了的文件变脏。整棵重写留给戳版本、缺清单这种结构破坏。
+  const full = stamp.version !== SYNC_VERSION || stamp.complete !== true
+    || !fs.existsSync(readyFile) || !stamp.files || !stamp.targets;
+  if (!full && stamp.kinds) {
+    for (const rel of Object.keys(stamp.files)) {
+      if ((stamp.kinds[rel] || '') !== (table[rel] || '')) dirty.add(rel);
+    }
+  }
   const targetCheckStart = process.hrtime.bigint();
   // Check targets as well as sources: build tools can overwrite copied inputs.
   if (!full) {
@@ -313,8 +328,10 @@ function syncKeilTree(repoRoot, emit) {
       if (!current || current !== stamp.targets[rel]) dirty.add(rel);
     }
   }
-  const timings = { gitListMs: snapshot.gitListMs, sourceScanMs: snapshot.sourceScanMs,
-    targetCheckMs: Number(process.hrtime.bigint() - targetCheckStart) / 1e6 };
+  const timings = {
+    gitListMs: snapshot.gitListMs, sourceScanMs: snapshot.sourceScanMs,
+    targetCheckMs: Number(process.hrtime.bigint() - targetCheckStart) / 1e6
+  };
   const clean = !full && dirty.size === 0;
 
   let junctioned = 0;
@@ -364,11 +381,15 @@ function syncKeilTree(repoRoot, emit) {
   }
 
   try { fs.unlinkSync(readyFile); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-  const nextStamp = { version: SYNC_VERSION, head: head, branch: branch, files: {}, targets: {}, libraryFiles: snapshot.libraryFiles };
+  const nextStamp = {
+    version: SYNC_VERSION, head: head, branch: branch, files: {}, targets: {}, kinds: {},
+    libraryFiles: snapshot.libraryFiles
+  };
   const incremental = !full && dirty.size > 0;
   if (incremental && stamp.files) {
     Object.keys(stamp.files).forEach((rel) => { nextStamp.files[rel] = stamp.files[rel]; });
     Object.assign(nextStamp.targets, stamp.targets);
+    if (stamp.kinds) Object.assign(nextStamp.kinds, stamp.kinds);
   }
   let written = 0;
   let skipped = 0;
