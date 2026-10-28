@@ -1946,20 +1946,32 @@ test('shim drops listed files that only exist on the other branch', () => {
     fs.writeFileSync(path.join(root, 'keep', 'a.txt'), 'other-a\n');
     fs.writeFileSync(path.join(root, 'keep', 'b.txt'), 'other-b\n');
     fs.writeFileSync(path.join(root, 'keep', 'c.txt'), 'other-c\n');
-    git(['add', '--', 'keep/a.txt', 'keep/b.txt', 'keep/c.txt']);
+    fs.mkdirSync(path.join(root, 'keep', 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'keep', 'sub', 'from-other.md'), 'branch\n');
+    git(['add', '--', 'keep/a.txt', 'keep/b.txt', 'keep/c.txt', 'keep/sub/from-other.md']);
     git(['commit', '-q', '-m', 'b']);
     git(['checkout', '-q', '-']);
     installLocalConfig(root, path.join(__dirname, '..'));
     fs.writeFileSync(path.join(root, 'keep', 'a.txt'), 'edited-a\n');
     fs.writeFileSync(path.join(root, 'keep', 'mine.txt'), 'untracked\n');
     fs.writeFileSync(path.join(root, 'keep', 'c.txt'), 'mine-c\n');
+    fs.mkdirSync(path.join(root, 'keep', 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'keep', 'sub', 'gitkeep'), '');
+    fs.writeFileSync(path.join(root, 'keep', 'sub', 'note.txt'), 'local-note\n');
     const switched = spawnSync(exe, ['checkout', '-q', 'other'], { cwd: root, encoding: 'utf8' });
     assert.strictEqual(switched.status, 0, String(switched.stderr || switched.stdout));
     assert.strictEqual(fs.readFileSync(path.join(root, 'keep', 'a.txt'), 'utf8'), 'edited-a\n');
     assert.strictEqual(fs.existsSync(path.join(root, 'keep', 'b.txt')), false);
+    assert.strictEqual(fs.existsSync(path.join(root, 'keep', 'sub', 'from-other.md')), false);
+    assert.strictEqual(fs.readFileSync(path.join(root, 'keep', 'sub', 'gitkeep'), 'utf8'), '');
+    assert.strictEqual(fs.readFileSync(path.join(root, 'keep', 'sub', 'note.txt'), 'utf8'), 'local-note\n');
     assert.strictEqual(fs.readFileSync(path.join(root, 'keep', 'mine.txt'), 'utf8'), 'untracked\n');
     assert.strictEqual(fs.readFileSync(path.join(root, 'keep', 'c.txt'), 'utf8'), 'mine-c\n');
-    assert.strictEqual(git(['status', '--porcelain', '--', 'keep']), '?? keep/mine.txt');
+    const status = git(['status', '--porcelain', '--', 'keep']);
+    assert.ok(status.indexOf('?? keep/mine.txt') >= 0, status);
+    assert.ok(status.indexOf('?? keep/sub/note.txt') >= 0, status);
+    assert.ok(status.indexOf('from-other') < 0, status);
+    assert.ok(status.indexOf('b.txt') < 0, status);
     assert.strictEqual(fs.existsSync(path.join(root, '.zkz', 'local', 'keep', 'a.txt')), false);
   } finally {
     try { uninstallLocalConfig(root); } catch (_) { stopLocalWatch(root); }

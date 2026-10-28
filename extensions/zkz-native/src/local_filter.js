@@ -220,17 +220,32 @@ function sweepOldSnaps(repoRoot) {
   }
 }
 
-// 从任意目录列出普通文件。符号链接不跟着走。
+// commands、hooks 这类目录里的 gitkeep 用来占住目录。删掉后目录变空，Cursor 会占住句柄，再 scandir 就是 EPERM，只能重启。
+function isGitkeep(rel) {
+  const name = slashRel(rel).split('/').pop().toLowerCase();
+  return name === 'gitkeep' || name === '.gitkeep';
+}
+
+function dirBusy(err) {
+  return !!(err && (err.code === 'EPERM' || err.code === 'EACCES' || err.code === 'EBUSY' || err.code === 'ENOENT' || err.code === 'ENOTDIR'));
+}
+
+// 从任意目录列出普通文件。符号链接不跟着走。目录被 Cursor 占住时跳过，不让这次切换失败。
 function listTreeFiles(abs, rel) {
   let st;
   try { st = fs.lstatSync(abs); }
   catch (err) {
-    if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return [];
+    if (dirBusy(err)) return [];
     throw err;
   }
   if (st.isDirectory()) {
     const out = [];
-    const names = fs.readdirSync(abs);
+    let names = [];
+    try { names = fs.readdirSync(abs); }
+    catch (err) {
+      if (dirBusy(err)) return [];
+      throw err;
+    }
     for (let i = 0; i < names.length; i++) {
       const child = slashRel(rel) + '/' + names[i];
       const nested = listTreeFiles(path.join(abs, names[i]), child);
@@ -261,20 +276,88 @@ function underPrefix(rel, prefixes) {
   return false;
 }
 
-// 删掉 Git 在这个清单路径上写出的内容，再把快照改名回来。
+// 先把快照里的 gitkeep 放回，再删 Git 写出的其他文件。目录里一直有 gitkeep，不会变空。
+function moveSnapshotFile(repoRoot, rel) {
+  const from = keepFile(repoRoot, rel);
+  const to = worktreeFile(repoRoot, rel);
+  if (!pathExists(from)) return;
+  try { fs.mkdirSync(path.dirname(to), { recursive: true }); }
+  catch (err) { if (!dirBusy(err)) throw err; }
+  try {
+    fs.renameSync(from, to);
+    return;
+  } catch (_) { /* 目标还在，改成覆盖写 */ }
+  try {
+    atomicWriteFile(to, fs.readFileSync(from));
+    try { fs.unlinkSync(from); } catch (__) { /* 快照留着，下次再放回 */ }
+  } catch (err) { if (!dirBusy(err)) throw err; }
+}
+
+function removeTreeExceptGitkeep(abs) {
+  let st;
+  try { st = fs.lstatSync(abs); }
+  catch (err) {
+    if (dirBusy(err)) return;
+    throw err;
+  }
+  if (!st.isDirectory()) {
+    if (isGitkeep(abs)) return;
+    try { fs.unlinkSync(abs); }
+    catch (err) { if (!dirBusy(err)) throw err; }
+    return;
+  }
+  let names = [];
+  try { names = fs.readdirSync(abs); }
+  catch (err) {
+    if (dirBusy(err)) return;
+    throw err;
+  }
+  for (let i = 0; i < names.length; i++) {
+    if (isGitkeep(names[i])) continue;
+    removeTreeExceptGitkeep(path.join(abs, names[i]));
+  }
+  let left = [];
+  try { left = fs.readdirSync(abs); }
+  catch (err) {
+    if (dirBusy(err)) return;
+    throw err;
+  }
+  if (left.length) return;
+  try { fs.rmdirSync(abs); }
+  catch (_) { /* 空目录仍被占用时留着 */ }
+}
+
+// 删掉 Git 在这个清单路径上写出的内容，再把快照放回来。gitkeep 不删。
 function unparkPrefix(repoRoot, rel) {
   const abs = worktreeFile(repoRoot, rel);
   const dest = keepFile(repoRoot, rel);
   if (!pathExists(dest)) return false;
-  try { fs.rmSync(abs, { recursive: true, force: true }); }
+  let st;
+  try { st = fs.lstatSync(dest); }
   catch (_) { return false; }
-  try {
-    fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.renameSync(dest, abs);
-    return true;
-  } catch (_) {
-    return false;
+  if (!st.isDirectory()) {
+    moveSnapshotFile(repoRoot, rel);
+    return pathExists(abs);
   }
+  if (!pathExists(abs)) {
+    try {
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.renameSync(dest, abs);
+      return true;
+    } catch (_) { return false; }
+  }
+  const files = listTreeFiles(dest, rel);
+  for (let i = 0; i < files.length; i++) {
+    if (isGitkeep(files[i])) moveSnapshotFile(repoRoot, files[i]);
+  }
+  removeTreeExceptGitkeep(abs);
+  for (let i = 0; i < files.length; i++) {
+    if (!isGitkeep(files[i])) moveSnapshotFile(repoRoot, files[i]);
+  }
+  if (!listTreeFiles(dest, rel).length) {
+    try { fs.rmSync(dest, { recursive: true, force: true }); } catch (_) { /* 快照还在，下次再放回 */ }
+  }
+  return true;
 }
 
 // 同一仓库里改名不搬内容。目标上若还留着上次的副本，先放回再重新挪走。
@@ -405,8 +488,9 @@ function prepareLocal(repo, moved, copied, setTracked) {
   return moved.concat(copied);
 }
 
-// 快照里没有的名单文件，从工作区删掉，并清掉因此空出来的目录。
+// 快照里没有的名单文件，从工作区删掉，并清掉因此空出来的目录。gitkeep 留着，避免目录变空后被 Cursor 占住。
 function removeWorktreeExtra(repoRoot, rel) {
+  if (isGitkeep(rel)) return;
   const file = worktreeFile(repoRoot, rel);
   try { fs.unlinkSync(file); }
   catch (err) {
