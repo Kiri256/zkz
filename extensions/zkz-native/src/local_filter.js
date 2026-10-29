@@ -9,13 +9,12 @@ const path = require('path');
 const { slashRel, localKeepRoot, runDir, atomicWriteFile } = require('./paths');
 const { git, gitConfigGet } = require('./git_exec');
 
-// 源码树里在 extensions/shared，装进扩展后在 src/shared。记不上不影响切换。
+const loadShared = require('./load_shared');
+
+/** 记一条性能日志。失败时返回空，不挡切换。扩展宿主或过滤进程调用。 */
 function recordPerf(root, phase, fields) {
   try {
-    let perf = null;
-    try { perf = require('../../shared/perf'); }
-    catch (_) { perf = require('./shared/perf'); }
-    perf.record(root, phase, fields);
+    loadShared('perf').record(root, phase, fields);
   } catch (_) { /* 性能日志失败不挡切换 */ }
 }
 

@@ -14,7 +14,7 @@
 
 ## 互相怎么调
 
-工程根目录、Keil 布局、过滤器是否启用、设置读写都在 `extensions/shared/`，三个扩展直接 `require`，不再互相回退。打包时 `require('../../shared/<名>')` 改写成 `require('./shared/<名>')`，并把对应文件拷进 vsix。
+工程根目录、Keil 布局、工程根解析、过滤器是否启用、设置读写都在 `extensions/shared/`。扩展源码用 `loadShared('模块名')` 加载，源码树和装进扩展后走同一条向上查找。打包按 `loadShared` 的名字把共享文件拷进 vsix 的 `src/shared/`，不再改写 require。`src/` 里直接 `require` shared 路径时打包失败。
 
 设置写在仓库 `.zkz/settings.json`（`native` / `keil` / `code`）。默认值在 `extensions/shared/zkz_settings.js`。工作区没有设置文件时按这些默认值生成，已有的键不覆盖。空字符串按未设置处理。这份文件不进 git。
 
@@ -29,7 +29,7 @@
 
 三个扩展的共享设置模块按 `settings.json` 的 mtime、ctime、大小缓存解析结果，最多保留 8 个工程；每次读取仍检查文件状态，写入、删除或解析失败时失效。返回的对象是副本，避免修改设置对象污染缓存。各扩展宿主/打包模块拥有自己的缓存，不共享跨进程内存。
 
-`zkz-code` 的宏表与折叠分析已有内存缓存。编译数据库每次刷新都重新解析工程 XML，不再另存解析结果。
+`zkz-code` 的宏表与折叠分析已有内存缓存。编译数据库先用内存；进程重启后读 `.zkz/run/compile-commands-cache.json`。摘要对不上或文件坏了就重新解析，并写回内存和这个文件。
 
 `zkz-native` 的过滤进程编码表、库目录快照、协议缓冲区与编烧树增量缓存详见 [native 缓存说明](zkz-native/README.md#内存与缓存优化)。`zkz-keil` 复用共享设置缓存；编译结果、烧录结果与硬件状态不缓存，仍实时执行外部工具。
 

@@ -1,6 +1,7 @@
 'use strict';
 
-const { resolveKeilLayout: resolveShared, layoutOptionsFromGet } = require('../../shared/keil_layout');
+const loadShared = require('./load_shared');
+const { resolveKeilLayout: resolveShared, layoutOptionsFromGet } = loadShared('keil_layout');
 const cfg = require('./keil_config');
 
 function resolveKeilLayout(root) {

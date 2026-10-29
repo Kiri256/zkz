@@ -248,8 +248,11 @@ test('compile_commands reparses and skips identical writes', () => {
     const project = path.join(mdk, 'b_01.uvproj');
     const xml = '<Project><Targets><Target><TargetName>Flash</TargetName><Groups><Group><Files><File><FileType>1</FileType><FilePath>../../User/main.c</FilePath></File></Files></Group></Groups></Target></Targets></Project>';
     fs.writeFileSync(project, xml);
+    const cachePath = path.join(root, '.zkz', 'run', 'compile-commands-cache.json');
     await cc.refreshCompileCommands(root, { force: true });
-    assert.ok(!fs.existsSync(path.join(root, '.zkz', 'run', 'compile-commands-cache.json')));
+    const saved = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+    assert.strictEqual(saved.target, 'Flash');
+    assert.strictEqual(JSON.parse(saved.text)[0].file, path.join(root, 'User', 'main.c'));
     const originalWrite = fs.writeFileSync;
     let outputWrites = 0;
     fs.writeFileSync = function (p, ...args) {
@@ -259,6 +262,11 @@ test('compile_commands reparses and skips identical writes', () => {
     await cc.refreshCompileCommands(root, { force: true });
     fs.writeFileSync = originalWrite;
     assert.strictEqual(outputWrites, 0);
+    const persisted = fs.readFileSync(cachePath, 'utf8');
+    delete require.cache[require.resolve(modulePath)];
+    const reloaded = require(modulePath);
+    await reloaded.refreshCompileCommands(root, { force: true });
+    assert.strictEqual(fs.readFileSync(cachePath, 'utf8'), persisted);
     const output = path.join(root, 'compile_commands.json');
     fs.writeFileSync(output, 'corrupted');
     await cc.refreshCompileCommands(root, { force: true });

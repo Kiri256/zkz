@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const loadShared = require('./load_shared');
 
 const BUNDLED_PATH = path.join(__dirname, 'workspace_lists.json');
 const REL_JSON = path.join('.zkz', 'workspace_lists.json');
@@ -46,7 +47,7 @@ function readListsFile(p) {
 
 function workspaceListsRoot() {
   try {
-    const pair = require('./pair').resolvePair();
+    const pair = loadShared('pair').resolvePair();
     return pair.root || null;
   } catch (_) {
     return null;

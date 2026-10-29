@@ -1,7 +1,8 @@
 'use strict';
 
 const vscode = require('vscode');
-const { resolvePair } = require('./pair');
+const loadShared = require('./load_shared');
+const { resolvePair } = loadShared('pair');
 const statusBar = require('./status_bar');
 
 function setPaired() {
@@ -15,7 +16,7 @@ function setPaired() {
 }
 
 function ensureSettings() {
-  try { require('../../shared/zkz_settings').ensure(resolvePair().root); } catch (_) { /* unpaired */ }
+  try { loadShared('zkz_settings').ensure(resolvePair().root); } catch (_) { /* unpaired */ }
 }
 
 function activate(context) {

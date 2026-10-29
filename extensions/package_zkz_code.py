@@ -77,6 +77,6 @@ def prune_node_modules(nm):
 if __name__ == "__main__":
     raise SystemExit(main("zkz-code", (
         "extension.js", "status.js", "status_bar.js", "util.js", "macros.js", "pp_expr.js", "macro_impact.js",
-        "ifdef_fold.js", "encoding.js", "pair.js", "lists.js",
+        "ifdef_fold.js", "encoding.js", "load_shared.js", "lists.js",
         "compile_commands.js", "cc_stamp.js", "head_watch.js", "cmsis.js", "workspace_lists.json",
     ), prune_node_modules))

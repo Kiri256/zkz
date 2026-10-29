@@ -1,7 +1,8 @@
 'use strict';
 
 const vscode = require('vscode');
-const { findProjectRoot } = require('../../shared/project_root');
+const loadShared = require('./load_shared');
+const { findProjectRoot } = loadShared('project_root');
 const { isInstalled } = require('./git_config');
 const { enable, disable, refresh, statusSnapshot, statusLines } = require('./bootstrap');
 const { git } = require('./git_exec');
@@ -131,7 +132,7 @@ function cmdSyncKeilTree() {
 function cmdToggleLocal(extensionRoot) {
   const repo = resolveRepo();
   return withLock(repo, () => {
-    const settings = require('../../shared/zkz_settings');
+    const settings = loadShared('zkz_settings');
     const next = !isLocalInstalled(repo);
     settings.set(repo, 'native', 'local', next);
     if (!next) {

@@ -15,6 +15,7 @@ const {
   invalidateMacroTable,
   resolveMacroRoot
 } = require('./macros');
+const loadShared = require('./load_shared');
 const { evalPpExprResult } = require('./pp_expr');
 
 const LANGS = ['c', 'cpp', 'cuda-cpp'];
@@ -42,14 +43,14 @@ function command(name) {
 }
 
 function repoRoot() {
-  try { return require('./pair').resolvePair().root; } catch (_) { return ''; }
+  try { return loadShared('pair').resolvePair().root; } catch (_) { return ''; }
 }
 
 function cfgEnabled() {
   try {
     const root = repoRoot();
     if (!root) return true;
-    return require('../../shared/zkz_settings').get(root, 'code', 'ifdefFold.enabled', true) !== false;
+    return loadShared('zkz_settings').get(root, 'code', 'ifdefFold.enabled', true) !== false;
   } catch (_) {
     return true;
   }
@@ -59,7 +60,7 @@ function cfgMinLines() {
   try {
     const root = repoRoot();
     if (!root) return 2;
-    const n = Number(require('../../shared/zkz_settings').get(root, 'code', 'ifdefFold.minLines', 2));
+    const n = Number(loadShared('zkz_settings').get(root, 'code', 'ifdefFold.minLines', 2));
     return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 2;
   } catch (_) {
     return 2;
@@ -638,7 +639,7 @@ function watchSettingsFile(context) {
   }
   const root = repoRoot();
   if (!root) return;
-  try { require('../../shared/zkz_settings').ensure(root); } catch (_) { /* ignore */ }
+  try { loadShared('zkz_settings').ensure(root); } catch (_) { /* ignore */ }
   const watcher = vscode.workspace.createFileSystemWatcher(
     new vscode.RelativePattern(path.join(root, '.zkz'), 'settings.json')
   );
@@ -665,7 +666,7 @@ function foldToggleLabel() {
 async function toggleIfdefFold() {
   const root = repoRoot();
   if (!root) throw new Error('Open a workspace first');
-  require('../../shared/zkz_settings').set(root, 'code', 'ifdefFold.enabled', !cfgEnabled());
+  loadShared('zkz_settings').set(root, 'code', 'ifdefFold.enabled', !cfgEnabled());
 }
 
 function onMacrosChanged() {

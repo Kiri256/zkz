@@ -3,13 +3,14 @@
 const fs = require('fs');
 const path = require('path');
 const { BEGIN, END, replaceMarkedBlock, stripMarkedBlock, markedBody, nodeBin, scriptPath } = require('./git_config');
+const { hooksGitDir } = require('./git_exec');
 const { appendLog } = require('./paths');
 
 const HOOKS = ['pre-commit', 'pre-push'];
 const LEGACY_REFRESH_HOOKS = ['post-checkout', 'post-merge', 'post-rewrite'];
 
 function hookFile(repoRoot, name) {
-  return path.join(repoRoot, '.git', 'hooks', name);
+  return path.join(hooksGitDir(repoRoot), 'hooks', name);
 }
 
 function nativeSnippet(extensionRoot, event) {

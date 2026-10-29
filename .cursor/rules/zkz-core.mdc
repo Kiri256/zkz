@@ -1,0 +1,16 @@
+---
+description: zkz 工具箱的仓库边界、编码和真源安全约定
+alwaysApply: true
+---
+
+# zkz 工具箱
+
+本仓库是 b_01 系列的本地工具箱，不是固件工程。源码在 `extensions/`，说明在 `docs/` 和各包 `README.md`。运行时不调用 `scripts/`。
+
+文档、脚本和扩展源码用 UTF-8（无 BOM）和 LF。`.zkz/settings.json`、`.zkz/run/` 是工作区运行时文件，不提交。
+
+## 真源
+
+- 启用 `zkz-native` 后，真源工作区 `.c/.h` 用 UTF-8 改；提交由 clean 写回仓库原编码。Keil 编 `.zkz/keil-native/`。
+- 未启用 native 时，不要把真源或库 Junction 当成 UTF-8 批量改写。
+- F429 烧录只动应用区。不要对整片执行 J-Link `erase`。Boot 不在应用 `output.hex` 里。

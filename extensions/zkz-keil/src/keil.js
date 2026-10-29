@@ -4,9 +4,10 @@ const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { resolvePair } = require('./pair');
+const loadShared = require('./load_shared');
+const { resolvePair } = loadShared('pair');
 const { resolveKeilLayout } = require('./keil_layout');
-const { isNativeInstalled } = require('../../shared/native_installed');
+const { isNativeInstalled } = loadShared('native_installed');
 const { getJLinkFlashTool, jlinkGdbServerPath, invokeJLinkHexFlash } = require('./keil_flash');
 
 let iconv = null;
@@ -379,7 +380,7 @@ async function performFlash(pair, token, emit, progress, confirmDebug) {
 
 async function runPrepare(pair, emit) {
   emit('准备调试');
-  const { folderForRoot } = require('../../shared/project_root');
+  const { folderForRoot } = loadShared('project_root');
   const opened = folderForRoot(
     (vscode.workspace.workspaceFolders || []).map(function (f) { return f.uri.fsPath; }),
     pair.root

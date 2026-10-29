@@ -3,8 +3,9 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const loadShared = require('./load_shared');
 const { libTops } = require('./paths');
-const { gitConfigGet, gitConfigSet, gitConfigUnset } = require('./git_exec');
+const { gitConfigGet, gitConfigSet, gitConfigUnset, infoGitDir } = require('./git_exec');
 
 const BEGIN = '# >>> zkz-native';
 const END = '# <<< zkz-native';
@@ -38,11 +39,11 @@ function quoteCmd(bin, script) {
 }
 
 function attributesPath(repoRoot) {
-  return path.join(repoRoot, '.git', 'info', 'attributes');
+  return path.join(infoGitDir(repoRoot), 'info', 'attributes');
 }
 
 function excludePath(repoRoot) {
-  return path.join(repoRoot, '.git', 'info', 'exclude');
+  return path.join(infoGitDir(repoRoot), 'info', 'exclude');
 }
 
 function escapeMarker(s) {
@@ -132,7 +133,7 @@ function isLocalInstalled(repoRoot) {
 
 // .zkz/settings.json 的 native.local。没有这项时沿用当前 git 开关，避免补默认值时把已打开的关掉。
 function localSwitchWanted(repoRoot) {
-  const settings = require('../../shared/zkz_settings');
+  const settings = loadShared('zkz_settings');
   const cur = settings.load(repoRoot);
   const native = cur && cur.native;
   if (!native || !Object.prototype.hasOwnProperty.call(native, 'local')) {
@@ -230,7 +231,7 @@ function uninstallGitConfig(repoRoot) {
 }
 
 function isInstalled(repoRoot) {
-  return require('../../shared/native_installed').isNativeInstalled(repoRoot);
+  return loadShared('native_installed').isNativeInstalled(repoRoot);
 }
 
 function quotedPaths(cmd) {
@@ -299,6 +300,7 @@ module.exports = {
   commandPathsExist,
   quotedPaths,
   attributesPath,
+  excludePath,
   attributesBody,
   nodeBin,
   isNodeExecutable,

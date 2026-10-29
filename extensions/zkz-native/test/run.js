@@ -899,6 +899,54 @@ test('gitArgs injects required=false only in hook', () => {
   }
 });
 
+test('hooks and attributes follow a linked worktree gitdir', () => {
+  const os = require('os');
+  const path = require('path');
+  const fs = require('fs');
+  const { hookFile } = require('../src/hooks');
+  const { attributesPath, excludePath } = require('../src/git_config');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-gitdir-'));
+  const repo = path.join(root, 'repo');
+  const wtGit = path.join(root, 'wtgit');
+  const common = path.join(root, 'common');
+  fs.mkdirSync(repo);
+  fs.mkdirSync(path.join(wtGit, 'info'), { recursive: true });
+  fs.mkdirSync(common);
+  fs.writeFileSync(path.join(wtGit, 'commondir'), common, 'utf8');
+  fs.writeFileSync(path.join(repo, '.git'), 'gitdir: ' + wtGit.replace(/\\/g, '/') + '\n', 'utf8');
+  assert.strictEqual(path.resolve(hookFile(repo, 'pre-commit')), path.join(common, 'hooks', 'pre-commit'));
+  assert.strictEqual(path.resolve(attributesPath(repo)), path.join(wtGit, 'info', 'attributes'));
+  assert.strictEqual(path.resolve(excludePath(repo)), path.join(wtGit, 'info', 'exclude'));
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('clean uses a disk encoding entry without reading the blob', () => {
+  const os = require('os');
+  const path = require('path');
+  const fs = require('fs');
+  const { spawnSync } = require('child_process');
+  const { clean } = require('../src/filter_core');
+  const { saveTable } = require('../src/enc_table');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-disk-enc-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+  };
+  git(['init', '-q']);
+  git(['config', 'user.email', 'a@b.c']);
+  git(['config', 'user.name', 't']);
+  git(['config', 'core.autocrlf', 'false']);
+  const gbk = encodeCp936('// \u4e2d\u6587\n');
+  fs.writeFileSync(path.join(dir, 'a.c'), gbk);
+  git(['add', 'a.c']);
+  git(['commit', '-q', '-m', 'init']);
+  saveTable(dir, { 'a.c': 'Utf8' });
+  const wt = Buffer.from('// \u4e2d\u6587\n', 'utf8');
+  const out = clean('a.c', wt, {}, dir);
+  assert.ok(out.equals(wt));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('HOOKS are only pre-commit and pre-push', () => {
   const { HOOKS, LEGACY_REFRESH_HOOKS } = require('../src/hooks');
   assert.deepStrictEqual(HOOKS.slice().sort(), ['pre-commit', 'pre-push']);
@@ -1603,6 +1651,41 @@ async function runAsync() {
 
   try {
     const { spawnSync } = require('child_process');
+    const { buildTable, saveTable } = require('../src/enc_table');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-sticky-blob-'));
+    const git = (args) => {
+      const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+      if (r.status !== 0) throw new Error(args.join(' ') + '\n' + (r.stderr || r.stdout));
+      return String(r.stdout || '').trim();
+    };
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'false']);
+    fs.writeFileSync(path.join(dir, 'a.c'), 'int a;\n');
+    git(['add', 'a.c']);
+    git(['commit', '-q', '-m', 'base']);
+    const base = git(['rev-parse', 'HEAD']);
+    saveTable(dir, { 'a.c': 'Gbk+crlf' });
+    fs.writeFileSync(path.join(dir, 'b.c'), 'int edited;\n');
+    git(['add', 'b.c']);
+    git(['commit', '-q', '-m', 'add']);
+    const added = git(['rev-parse', 'HEAD']);
+    await buildTable(dir, { from: base, to: added });
+    fs.writeFileSync(path.join(dir, 'a.c'), 'int edited;\n');
+    git(['add', 'a.c']);
+    git(['commit', '-q', '-m', 'edit']);
+    const edited = git(['rev-parse', 'HEAD']);
+    const kept = await buildTable(dir, { from: added, to: edited });
+    assert.strictEqual(kept.files['a.c'], 'Gbk+crlf');
+    ok('known blob keeps an encoding that is only in the current table');
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch (e) {
+    fail('known blob keeps an encoding that is only in the current table', e);
+  }
+
+  try {
+    const { spawnSync } = require('child_process');
     const { buildTable, loadTable } = require('../src/enc_table');
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-table-cache-'));
     const git = (args) => {
@@ -1634,10 +1717,51 @@ async function runAsync() {
     assert.ok(back.files['a.c']);
     assert.strictEqual(back.files['b.c'], undefined);
     assert.strictEqual(loadTable(dir)['b.c'], undefined);
+    const blobFile = path.join(dir, '.zkz', 'run', 'encoding-by-blob.json');
+    const blobStamp = fs.statSync(blobFile).mtimeMs;
+    const again = await buildTable(dir, { from: added, to: base });
+    assert.strictEqual(again.cacheHit, true);
+    assert.strictEqual(fs.statSync(blobFile).mtimeMs, blobStamp);
     ok('encoding table reuses the map already built for that commit');
     fs.rmSync(dir, { recursive: true, force: true });
   } catch (e) {
     fail('encoding table reuses the map already built for that commit', e);
+  }
+
+  try {
+    const { spawnSync } = require('child_process');
+    const { buildTable, saveTable } = require('../src/enc_table');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-wide-table-'));
+    const git = (args) => {
+      const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+      if (r.status !== 0) throw new Error(args.join(' ') + '\n' + (r.stderr || r.stdout));
+      return String(r.stdout || '').trim();
+    };
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'false']);
+    fs.writeFileSync(path.join(dir, 'keep.c'), 'int keep;\n');
+    for (let i = 0; i < 200; i++) fs.writeFileSync(path.join(dir, 'f' + i + '.c'), 'int v;\n');
+    git(['add', '.']);
+    git(['commit', '-q', '-m', 'base']);
+    const base = git(['rev-parse', 'HEAD']);
+    const first = await buildTable(dir);
+    const seeded = Object.assign({}, first.files);
+    seeded['keep.c'] = 'Gbk+crlf';
+    saveTable(dir, seeded);
+    for (let i = 0; i < 200; i++) fs.writeFileSync(path.join(dir, 'f' + i + '.c'), 'int changed;\n');
+    git(['add', '.']);
+    git(['commit', '-q', '-m', 'wide']);
+    const wide = git(['rev-parse', 'HEAD']);
+    const rebuilt = await buildTable(dir, { from: base, to: wide });
+    assert.strictEqual(rebuilt.incremental, false);
+    assert.strictEqual(rebuilt.files['keep.c'], 'Gbk+crlf');
+    assert.strictEqual(rebuilt.files['f0.c'], 'Ascii');
+    ok('distant trees rebuild the encoding table instead of diffing');
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch (e) {
+    fail('distant trees rebuild the encoding table instead of diffing', e);
   }
 
   try {
@@ -2629,12 +2753,74 @@ test('keil branch switch rewrites only files that changed', () => {
   const git = (args) => {
     const r = spawnSync('git', args, { cwd: dir, windowsHide: true, encoding: 'utf8' });
     assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+    return String(r.stdout || '');
   };
   try {
     git(['init', '-q']);
     git(['config', 'user.email', 'a@b.c']);
     git(['config', 'user.name', 't']);
     git(['config', 'core.autocrlf', 'false']);
+    git(['checkout', '-q', '-b', 'base']);
+    const baseBranch = 'base';
+    fs.mkdirSync(path.join(dir, 'User'));
+    fs.writeFileSync(path.join(dir, 'User', 'a.c'), 'int a;\n');
+    fs.writeFileSync(path.join(dir, 'User', 'b.c'), 'int b;\n');
+    fs.writeFileSync(path.join(dir, 'User', 'c.c'), 'int c;\n');
+    git(['add', 'User']);
+    git(['commit', '-q', '-m', 'base']);
+    syncKeilTree(dir);
+    const flash = path.join(dir, '.zkz', 'keil-native', 'Project', 'MDK-ARM(uV4)', 'Flash', 'a.o');
+    fs.mkdirSync(path.dirname(flash), { recursive: true });
+    fs.writeFileSync(flash, 'obj');
+    git(['checkout', '-q', '-b', 'other']);
+    fs.writeFileSync(path.join(dir, 'User', 'b.c'), 'int changed;\n');
+    fs.unlinkSync(path.join(dir, 'User', 'c.c'));
+    git(['add', '-A', '--', 'User']);
+    git(['commit', '-q', '-m', 'edit']);
+    const touched = new Date();
+    fs.utimesSync(path.join(dir, 'User', 'a.c'), touched, touched);
+    const switched = syncKeilTree(dir);
+    const kn = path.join(dir, '.zkz', 'keil-native', 'User');
+    assert.strictEqual(switched.written, 1);
+    assert.ok(switched.pruned >= 1);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'a.c'), 'utf8'), 'int a;\n');
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'b.c'), 'utf8'), 'int changed;\n');
+    assert.strictEqual(fs.existsSync(path.join(kn, 'c.c')), false);
+    const baseOid = git(['rev-parse', 'base']).trim();
+    const cachedFlash = path.join(dir, '.zkz', 'run', 'keil-cache', baseOid, 'tree', 'Project', 'MDK-ARM(uV4)', 'Flash', 'a.o');
+    assert.strictEqual(fs.existsSync(cachedFlash), false);
+    assert.strictEqual(fs.existsSync(flash), true);
+    assert.strictEqual(syncKeilTree(dir).cacheHit, true);
+    git(['checkout', '-q', baseBranch]);
+    const back = syncKeilTree(dir);
+    assert.strictEqual(back.cacheHit, true);
+    assert.strictEqual(back.written, 0);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'a.c'), 'utf8'), 'int a;\n');
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'b.c'), 'utf8'), 'int b;\n');
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'c.c'), 'utf8'), 'int c;\n');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('partial keil restore does not rewrite the rest on the next sync', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { syncKeilTree } = require('../src/keil_tree');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-keil-partial-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: dir, windowsHide: true, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+    return String(r.stdout || '');
+  };
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'false']);
+    git(['checkout', '-q', '-b', 'base']);
     fs.mkdirSync(path.join(dir, 'User'));
     fs.writeFileSync(path.join(dir, 'User', 'a.c'), 'int a;\n');
     fs.writeFileSync(path.join(dir, 'User', 'b.c'), 'int b;\n');
@@ -2644,16 +2830,20 @@ test('keil branch switch rewrites only files that changed', () => {
     syncKeilTree(dir);
     git(['checkout', '-q', '-b', 'other']);
     fs.writeFileSync(path.join(dir, 'User', 'b.c'), 'int changed;\n');
-    fs.unlinkSync(path.join(dir, 'User', 'c.c'));
-    git(['add', '-A', '--', 'User']);
+    git(['add', 'User']);
     git(['commit', '-q', '-m', 'edit']);
-    const switched = syncKeilTree(dir);
+    syncKeilTree(dir);
+    git(['checkout', '-q', 'base']);
+    fs.writeFileSync(path.join(dir, 'User', 'a.c'), 'int edited;\n');
+    const partial = syncKeilTree(dir);
+    assert.strictEqual(partial.written, 1);
+    const again = syncKeilTree(dir);
+    assert.strictEqual(again.written, 0);
+    assert.strictEqual(again.cacheHit, true);
     const kn = path.join(dir, '.zkz', 'keil-native', 'User');
-    assert.strictEqual(switched.written, 1);
-    assert.ok(switched.pruned >= 1);
-    assert.strictEqual(fs.readFileSync(path.join(kn, 'a.c'), 'utf8'), 'int a;\n');
-    assert.strictEqual(fs.readFileSync(path.join(kn, 'b.c'), 'utf8'), 'int changed;\n');
-    assert.strictEqual(fs.existsSync(path.join(kn, 'c.c')), false);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'a.c'), 'utf8'), 'int edited;\n');
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'b.c'), 'utf8'), 'int b;\n');
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'c.c'), 'utf8'), 'int c;\n');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

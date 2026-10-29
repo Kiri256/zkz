@@ -11,7 +11,9 @@ import tempfile
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
-SHARED_REQUIRE_RE = re.compile(r"require\('\.\./\.\./shared/([A-Za-z0-9_]+)'\)")
+LOAD_SHARED_RE = re.compile(r"loadShared\(\s*'([A-Za-z0-9_]+)'\s*\)")
+REL_SHARED_RE = re.compile(r"require\(\s*'\./([A-Za-z0-9_]+)'\s*\)")
+FORBIDDEN_SHARED_RE = re.compile(r"""require\(\s*['"](?:\.\./\.\./shared|\./shared)/""")
 
 
 def _copy(src, dst):
@@ -19,20 +21,45 @@ def _copy(src, dst):
     shutil.copy2(src, dst)
 
 
+def shared_names_in_source(text):
+    return LOAD_SHARED_RE.findall(text)
+
+
+def assert_no_direct_shared_require(text, label):
+    if FORBIDDEN_SHARED_RE.search(text):
+        raise SystemExit("src 里不要直接 require shared，用 loadShared: %s" % label)
+
+
+def close_shared(names):
+    pending = list(names)
+    seen = []
+    seen_set = set()
+    while pending:
+        name = pending.pop(0)
+        if name in seen_set:
+            continue
+        seen_set.add(name)
+        seen.append(name)
+        shared = os.path.join(ROOT, "shared", name + ".js")
+        if not os.path.isfile(shared):
+            raise SystemExit("missing shared/%s.js" % name)
+        with open(shared, "r", encoding="utf-8") as f:
+            text = f.read()
+        for dep in REL_SHARED_RE.findall(text):
+            if dep not in seen_set:
+                pending.append(dep)
+    return seen
+
+
 def _stage_source(src, dst, shared_needed):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     if src.endswith(".js"):
         with open(src, "rb") as f:
             raw = f.read()
-        if b"../../shared/" in raw:
-            text = raw.decode("utf-8")
-            names = SHARED_REQUIRE_RE.findall(text)
-            for name in names:
-                shared_needed.add(name)
-            text = SHARED_REQUIRE_RE.sub(r"require('./shared/\1')", text)
-            with open(dst, "w", encoding="utf-8", newline="\n") as f:
-                f.write(text)
-            return
+        text = raw.decode("utf-8")
+        assert_no_direct_shared_require(text, src)
+        for name in shared_names_in_source(text):
+            shared_needed.add(name)
     shutil.copy2(src, dst)
 
 
@@ -105,11 +132,8 @@ def main(name, files, prune_node_modules=None):
                 os.path.join(stage, "src", *rel.split("/")),
                 shared_needed,
             )
-        for shared_name in sorted(shared_needed):
+        for shared_name in close_shared(shared_needed):
             shared = os.path.join(ROOT, "shared", shared_name + ".js")
-            if not os.path.isfile(shared):
-                sys.stderr.write("missing shared/%s.js\n" % shared_name)
-                return 1
             _copy(shared, os.path.join(stage, "src", "shared", shared_name + ".js"))
         nm = os.path.join(src, "node_modules")
         if os.path.isdir(nm):

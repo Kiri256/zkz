@@ -1,6 +1,7 @@
 'use strict';
 
-const settings = require('../../shared/zkz_settings');
+const loadShared = require('./load_shared');
+const settings = loadShared('zkz_settings');
 
 function get(root, key, fallback) {
   return settings.get(root, 'keil', key, fallback);

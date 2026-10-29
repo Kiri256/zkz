@@ -45,4 +45,4 @@
 
 `macroKeys` 读真源 `.zkz/workspace_lists.json`。同一文件的 `libraryDirNames` 给 zkz-native 决定编烧树里哪些目录做成链接。
 
-`compile_commands` 使用 `fast-xml-parser` 校验并解析工程 XML，支持属性、注释、CDATA、自闭合节点和数字实体；只从 `Project/Targets/Target` 选择编译目标，忽略调试选项中的嵌套 Target。Cads 支持实际工程的 `TargetArmAds` 层级。格式损坏时报告行号，避免生成部分数据库。每次刷新都重新解析工程；内容和现有文件相同时不改写。
+`compile_commands` 使用 `fast-xml-parser` 校验并解析工程 XML，支持属性、注释、CDATA、自闭合节点和数字实体；只从 `Project/Targets/Target` 选择编译目标，忽略调试选项中的嵌套 Target。Cads 支持实际工程的 `TargetArmAds` 层级。格式损坏时报告行号，避免生成部分数据库。工程 XML、目录、机型和目标没变时，先用内存里的结果，没有再读 `.zkz/run/compile-commands-cache.json`。两边都没有才解析，并写回内存和这个文件。内容和现有 `compile_commands.json` 相同时不改写。

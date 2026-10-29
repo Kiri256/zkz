@@ -2,11 +2,13 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { XMLParser, XMLValidator } = require('fast-xml-parser');
 const { writeCompileCommandsStamp } = require('./cc_stamp');
-const { resolveKeilLayout: resolveShared, layoutOptionsFromGet } = require('../../shared/keil_layout');
-const { get } = require('../../shared/zkz_settings');
-const { record: recordPerf } = require('../../shared/perf');
+const loadShared = require('./load_shared');
+const { resolveKeilLayout: resolveShared, layoutOptionsFromGet } = loadShared('keil_layout');
+const { get } = loadShared('zkz_settings');
+const { record: recordPerf } = loadShared('perf');
 
 function readKeilSetting(root) {
   return function (key, fallback) {
@@ -167,6 +169,52 @@ function writeIfChanged(file, text) {
   fs.writeFileSync(file, text, 'utf8');
 }
 
+let compileCache = null;
+
+function compileCommandsCachePath(root) {
+  return path.join(root, '.zkz', 'run', 'compile-commands-cache.json');
+}
+
+/** 这次工程内容的摘要。生成规则变了就换版本前缀，避免用上旧结果。扩展宿主线程调用。 */
+function compileCommandsCacheKey(mdk, xml, flavor, targetName) {
+  return crypto.createHash('sha1')
+    .update('v4\0' + path.resolve(mdk))
+    .update('\0' + xml)
+    .update('\0' + (flavor || ''))
+    .update('\0' + targetName)
+    .digest('hex');
+}
+
+/** 磁盘缓存能否当这次的编译数据库。摘要不一致或内容坏了返回 null。扩展宿主线程调用。 */
+function readPersistedCompileCommands(file, key) {
+  let obj;
+  try { obj = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return null; }
+  if (!obj || obj.key !== key || typeof obj.text !== 'string') return null;
+  let entries;
+  try { entries = JSON.parse(obj.text); } catch (_) { return null; }
+  if (!Array.isArray(entries) || !entries.length) return null;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (!entry || typeof entry.file !== 'string' || typeof entry.directory !== 'string' || !Array.isArray(entry.arguments)) {
+      return null;
+    }
+  }
+  return { key: key, text: obj.text, entries: entries, target: obj.target || '' };
+}
+
+/** 把这次解析结果写到磁盘。写失败不影响编译数据库。扩展宿主线程调用。 */
+function writePersistedCompileCommands(file, cached) {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({
+      key: cached.key,
+      text: cached.text,
+      target: cached.target
+    }, null, 2) + '\n', 'utf8');
+  } catch (_) { /* 持久化失败仍继续写出 compile_commands */ }
+}
+
+/** 生成 compile_commands。先用内存，没有再读磁盘缓存，都没有才解析工程。扩展宿主线程调用。 */
 async function generateOnRoot(root, log) {
   const perfStart = process.hrtime.bigint();
   const layout = resolveKeilLayout(root);
@@ -177,22 +225,51 @@ async function generateOnRoot(root, log) {
   }
   const mdk = (layout && (layout.mdk || layout.projectDir)) || path.dirname(proj);
   const targetName = (layout && layout.defaultTarget) || '';
-  if (log) log('generate compile_commands flavor=' + (layout.flavor || '') + ' uvproj=' + path.basename(proj) + ' target=' + targetName);
+  const flavor = layout.flavor || '';
+  if (log) log('generate compile_commands flavor=' + flavor + ' uvproj=' + path.basename(proj) + ' target=' + targetName);
   const xml = fs.readFileSync(proj, 'utf8').replace(/^\uFEFF/, '');
-  const built = buildCompileCommands(xml, mdk, targetName);
-  if (!built.entries.length) throw new Error('目标 ' + built.target + ' 里没有 C 源文件');
-  const text = JSON.stringify(built.entries, null, 4) + '\n';
+  const cacheKey = compileCommandsCacheKey(mdk, xml, flavor, targetName);
+  const cacheFile = compileCommandsCachePath(root);
+  let memoryHit = false;
+  let cacheHit = false;
+  let cached = null;
+  if (compileCache && compileCache.key === cacheKey) {
+    cached = compileCache;
+    memoryHit = true;
+    cacheHit = true;
+  } else {
+    cached = readPersistedCompileCommands(cacheFile, cacheKey);
+    if (cached) {
+      compileCache = cached;
+      cacheHit = true;
+    }
+  }
+  if (!cached) {
+    const built = buildCompileCommands(xml, mdk, targetName);
+    if (!built.entries.length) throw new Error('目标 ' + built.target + ' 里没有 C 源文件');
+    cached = {
+      key: cacheKey,
+      text: JSON.stringify(built.entries, null, 4) + '\n',
+      entries: built.entries,
+      target: built.target
+    };
+    compileCache = cached;
+    writePersistedCompileCommands(cacheFile, cached);
+  }
+  const text = cached.text;
   const src = path.join(mdk, 'compile_commands.json');
   const dst = path.join(root, 'compile_commands.json');
   writeIfChanged(src, text);
   if (path.resolve(src) !== path.resolve(dst)) writeIfChanged(dst, text);
   try { writeCompileCommandsStamp(root); } catch (_) { /* ignore */ }
-  if (log) log('compile_commands.json ready: ' + dst + ' (' + built.entries.length + ')');
+  if (log) log('compile_commands.json ready: ' + dst + ' (' + cached.entries.length + ')');
   recordPerf(root, 'zkz-code.generateCompileCommands', {
     ms: Number(process.hrtime.bigint() - perfStart) / 1e6,
-    entries: built.entries.length,
-    flavor: layout.flavor || '',
-    target: targetName
+    entries: cached.entries.length,
+    flavor: flavor,
+    target: targetName,
+    cacheHit: cacheHit,
+    memoryHit: memoryHit
   });
   return 'generated';
 }

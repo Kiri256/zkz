@@ -5,20 +5,20 @@ const path = require('path');
 const { detectKind, encodeMapped, hasCrlf, parseMapped } = require('./encoding');
 const { slashRel, tablePath, ensureZkz, isLibRel, formatLocalNow, atomicWriteJson } = require('./paths');
 const { acquireLock, releaseLock } = require('./lock');
-const { listSourceFiles, catFileBatch, currentHead, readHeadName, git } = require('./git_exec');
+const { listSourceFiles, catFileBatch, currentHead, readHeadName, git, indexBlobOid } = require('./git_exec');
 const { parseNameStatusZ } = require('./git_status');
-// 源码树里在 extensions/shared，装进扩展后在 src/shared。
-function loadPerf() {
-  try { return require('../../shared/perf'); }
-  catch (_) { return require('./shared/perf'); }
-}
-const { record: recordPerf } = loadPerf();
+const loadShared = require('./load_shared');
+const { record: recordPerf } = loadShared('perf');
 
 function emptyTable() {
   return Object.create(null);
 }
 
 const gTableCache = { root: '', mtime: 0, map: null, meta: null };
+// blob → 编码。本进程的工作副本；文件只在出现新 blob 时写。
+const gBlobCache = { root: '', mtime: '', blobs: null, dirty: false };
+// 路径上手工指定的编码，不跟 blob 混在一起。
+const gOverrideCache = { root: '', mtime: '', paths: null, dirty: false };
 
 function tableStamp(file) {
   try {
@@ -146,6 +146,11 @@ function noteNewFile(repoRoot, pathname, mapped, opts) {
   const overwrite = !!(opts && opts.overwrite);
   const key = slashRel(pathname);
   if (deferNotes) return noteNewFileDeferred(repoRoot, key, mapped, overwrite);
+  // 已在表里就直接用。编烧每个文件都抢锁重读整份 JSON，会拖到几十秒。
+  if (!overwrite) {
+    const cached = loadTable(repoRoot);
+    if (cached[key]) return cached[key];
+  }
   // 编烧树同步持有仓库锁时，过滤器和刷新仍会改编码表，所以这里用另一把锁。
   const lockDir = acquireLock(repoRoot, 'encoding-table');
   try {
@@ -170,59 +175,127 @@ function saveTable(repoRoot, files, extra) {
   }
 }
 
-const COMMIT_TABLE_LIMIT = 8;
-
 function commitOid(value) {
   const oid = String(value || '').trim().toLowerCase();
   return /^[0-9a-f]{40}$/.test(oid) ? oid : '';
 }
 
-function commitTablePath(repoRoot) {
-  return path.join(path.dirname(tablePath(repoRoot)), 'encoding-by-commit.json');
+function blobCachePath(repoRoot) {
+  return path.join(path.dirname(tablePath(repoRoot)), 'encoding-by-blob.json');
 }
 
-function readCommitTables(repoRoot) {
+function overridePath(repoRoot) {
+  return path.join(path.dirname(tablePath(repoRoot)), 'encoding-path-override.json');
+}
+
+function readBlobFile(repoRoot) {
   try {
-    const obj = JSON.parse(fs.readFileSync(commitTablePath(repoRoot), 'utf8'));
-    if (!obj || obj.version !== 1 || !obj.commits) return { version: 1, order: [], commits: {} };
-    if (!Array.isArray(obj.order)) obj.order = Object.keys(obj.commits);
-    return obj;
+    const obj = JSON.parse(fs.readFileSync(blobCachePath(repoRoot), 'utf8'));
+    if (!obj || obj.version !== 1 || !obj.blobs) return emptyTable();
+    return obj.blobs;
   } catch (_) {
-    return { version: 1, order: [], commits: {} };
+    return emptyTable();
   }
 }
 
-function copyFileMap(files) {
-  const out = emptyTable();
-  Object.keys(files || {}).forEach((k) => { out[slashRel(k)] = files[k]; });
-  return out;
-}
-
-// 同一个提交的编码结果留下。来回切分支时直接用，不再对整棵树重新 diff。
-function rememberCommitTable(repoRoot, head, files, includeLibs) {
-  const oid = commitOid(head);
-  if (!oid || !files) return;
+function readOverrideFile(repoRoot) {
   try {
-    ensureZkz(repoRoot);
-    const obj = readCommitTables(repoRoot);
-    obj.order = obj.order.filter((item) => item !== oid);
-    obj.order.push(oid);
-    while (obj.order.length > COMMIT_TABLE_LIMIT) {
-      const drop = obj.order.shift();
-      if (drop) delete obj.commits[drop];
-    }
-    obj.commits[oid] = { includeLibs: !!includeLibs, files: copyFileMap(files) };
-    atomicWriteJson(commitTablePath(repoRoot), obj);
-  } catch (_) { /* 缓存写不上就下次再算 */ }
+    const obj = JSON.parse(fs.readFileSync(overridePath(repoRoot), 'utf8'));
+    if (!obj || obj.version !== 1 || !obj.paths) return emptyTable();
+    return obj.paths;
+  } catch (_) {
+    return emptyTable();
+  }
 }
 
-function recallCommitTable(repoRoot, head, includeLibs) {
-  const oid = commitOid(head);
-  if (!oid) return null;
-  const obj = readCommitTables(repoRoot);
-  const rec = obj.commits[oid];
-  if (!rec || !!rec.includeLibs !== !!includeLibs || !rec.files) return null;
-  return copyFileMap(rec.files);
+// 两份路径表是否逐项相同。相同返回 true。过滤进程或扩展宿主调用。
+function mapsEqual(a, b) {
+  const aKeys = Object.keys(a || {});
+  const bKeys = Object.keys(b || {});
+  if (aKeys.length !== bKeys.length) return false;
+  for (let i = 0; i < aKeys.length; i++) {
+    if (a[aKeys[i]] !== b[aKeys[i]]) return false;
+  }
+  return true;
+}
+
+// 装入 blob → 编码。返回这张表。过滤进程或扩展宿主调用。
+function loadBlobCache(repoRoot) {
+  const file = blobCachePath(repoRoot);
+  const mtime = tableStamp(file);
+  if (gBlobCache.blobs && gBlobCache.root === repoRoot && (gBlobCache.dirty || gBlobCache.mtime === mtime)) {
+    return gBlobCache.blobs;
+  }
+  const blobs = readBlobFile(repoRoot);
+  gBlobCache.root = repoRoot;
+  gBlobCache.mtime = mtime;
+  gBlobCache.blobs = blobs;
+  gBlobCache.dirty = false;
+  return blobs;
+}
+
+// 记住这份 blob 的编码。相同则不标记写盘。过滤进程或扩展宿主调用。
+function rememberBlob(repoRoot, oid, mapped) {
+  const id = commitOid(oid);
+  if (!id || !mapped) return;
+  const blobs = loadBlobCache(repoRoot);
+  if (blobs[id] === mapped) return;
+  blobs[id] = mapped;
+  gBlobCache.dirty = true;
+}
+
+// 把新的 blob 编码写入文件。没有新内容返回 false。过滤进程或扩展宿主调用。
+function flushBlobCache(repoRoot) {
+  if (!gBlobCache.dirty || gBlobCache.root !== repoRoot || !gBlobCache.blobs) return false;
+  ensureZkz(repoRoot);
+  const file = blobCachePath(repoRoot);
+  atomicWriteJson(file, { version: 1, blobs: gBlobCache.blobs });
+  gBlobCache.mtime = tableStamp(file);
+  gBlobCache.dirty = false;
+  return true;
+}
+
+// 装入路径手工指定。返回路径表。过滤进程或扩展宿主调用。
+function loadPathOverrides(repoRoot) {
+  const file = overridePath(repoRoot);
+  const mtime = tableStamp(file);
+  if (gOverrideCache.paths && gOverrideCache.root === repoRoot && (gOverrideCache.dirty || gOverrideCache.mtime === mtime)) {
+    return gOverrideCache.paths;
+  }
+  const paths = readOverrideFile(repoRoot);
+  gOverrideCache.root = repoRoot;
+  gOverrideCache.mtime = mtime;
+  gOverrideCache.paths = paths;
+  gOverrideCache.dirty = false;
+  return paths;
+}
+
+// 路径编码和 blob 判定不一致时记下手工指定，一致时去掉。过滤进程或扩展宿主调用。
+function syncPathOverrides(repoRoot, files) {
+  const overrides = loadPathOverrides(repoRoot);
+  const blobs = loadBlobCache(repoRoot);
+  let changed = false;
+  Object.keys(files || {}).forEach((rel) => {
+    const oid = indexBlobOid(repoRoot, rel);
+    const known = oid && blobs[commitOid(oid)];
+    if (!known) return;
+    if (known === files[rel]) {
+      if (overrides[rel]) {
+        delete overrides[rel];
+        changed = true;
+      }
+    } else if (overrides[rel] !== files[rel]) {
+      overrides[rel] = files[rel];
+      changed = true;
+    }
+  });
+  if (!changed) return;
+  gOverrideCache.dirty = true;
+  ensureZkz(repoRoot);
+  const file = overridePath(repoRoot);
+  atomicWriteJson(file, { version: 1, paths: overrides });
+  gOverrideCache.mtime = tableStamp(file);
+  gOverrideCache.dirty = false;
 }
 
 function saveTableUnlocked(repoRoot, files, extra) {
@@ -238,6 +311,7 @@ function saveTableUnlocked(repoRoot, files, extra) {
     files: ordered
   }, extra || {});
   atomicWriteJson(tablePath(repoRoot), obj);
+  syncPathOverrides(repoRoot, ordered);
   if (gTableCache.root === repoRoot) {
     gTableCache.map = null;
     gTableCache.meta = null;
@@ -269,14 +343,30 @@ async function fillKinds(repoRoot, files, paths) {
         continue;
       }
       files[slice[j]] = encodeMapped(detectKind(rec.data), hasCrlf(rec.data));
+      rememberBlob(repoRoot, rec.oid, files[slice[j]]);
     }
   }
+  flushBlobCache(repoRoot);
+}
+
+// 改动面已经接近整棵树时，带重命名检测的增量比全量重算更慢。
+function diffIsWide(changed, existingCount) {
+  if (changed >= 800) return true;
+  return existingCount >= 200 && changed * 2 >= existingCount;
+}
+
+function changedSourceCount(repoRoot, from, to) {
+  const r = git(repoRoot, ['diff', '--name-only', '--no-renames', '-z', from, to, '--', '*.c', '*.h'], { allowFail: true });
+  if (r.status !== 0) return Number.POSITIVE_INFINITY;
+  return String(r.stdout || '').split('\0').filter(Boolean).length;
 }
 
 async function buildTableIncremental(repoRoot, from, to, skipLib) {
   if (!from || !to || from === to) return null;
   const existing = loadTable(repoRoot);
-  if (!Object.keys(existing).length) return null;
+  const existingCount = Object.keys(existing).length;
+  if (!existingCount) return null;
+  if (diffIsWide(changedSourceCount(repoRoot, from, to), existingCount)) return null;
   const r = git(repoRoot, ['diff', '--name-status', '-z', from, to, '--', '*.c', '*.h'], { allowFail: true });
   if (r.status !== 0) return null;
   const parsed = parseNameStatusZ(r.stdout);
@@ -304,6 +394,51 @@ async function buildTableIncremental(repoRoot, from, to, skipLib) {
   return { files: files, meta: meta, counts: countByKind(files), incremental: true };
 }
 
+// 小范围切换时，改过的路径沿用当前表里的编码。见过的 blob 不能盖掉还没写成手工指定的那一项。返回是否改过。过滤进程或扩展宿主调用。
+function keepEditedEncodings(repoRoot, from, to, files) {
+  const existing = loadTable(repoRoot);
+  const r = git(repoRoot, ['diff', '--name-status', '-z', from, to, '--', '*.c', '*.h'], { allowFail: true });
+  if (!r || r.status !== 0) return false;
+  const parsed = parseNameStatusZ(r.stdout);
+  let changed = false;
+  for (let i = 0; i < parsed.records.length; i++) {
+    const rec = parsed.records[i];
+    const path = rec.path || '';
+    let kept = '';
+    if (rec.status === 'M') kept = existing[path] || '';
+    else if ((rec.status === 'R' || rec.status === 'C') && rec.oldPath) kept = existing[rec.oldPath] || '';
+    if (!kept || !path || files[path] === kept) continue;
+    files[path] = kept;
+    changed = true;
+  }
+  return changed;
+}
+
+// 按当前索引把 blob 缓存和路径手工指定拼成编码表。knownOnly 时只要有没见过的 blob 就返回 null。过滤进程或扩展宿主调用。
+async function projectTable(repoRoot, skipLib, knownOnly) {
+  const paths = listSourceFiles(repoRoot).map(slashRel).filter((rel) => !(skipLib && isLibRel(repoRoot, rel)));
+  const overrides = loadPathOverrides(repoRoot);
+  const blobs = loadBlobCache(repoRoot);
+  const files = emptyTable();
+  const detect = [];
+  for (let i = 0; i < paths.length; i++) {
+    const rel = paths[i];
+    if (overrides[rel]) {
+      files[rel] = overrides[rel];
+      continue;
+    }
+    const oid = commitOid(indexBlobOid(repoRoot, rel));
+    if (oid && blobs[oid]) {
+      files[rel] = blobs[oid];
+      continue;
+    }
+    if (knownOnly) return null;
+    detect.push(rel);
+  }
+  if (detect.length) await fillKinds(repoRoot, files, detect);
+  return { files: files, detected: detect.length };
+}
+
 async function buildTable(repoRoot, opts) {
   const lockDir = acquireLock(repoRoot, 'encoding-table');
   try {
@@ -323,55 +458,47 @@ async function buildTableBody(repoRoot, opts) {
   const force = !!(opts && opts.force);
   const includeLibs = !skipLib;
   if (!force && opts && opts.from && opts.to && opts.from !== opts.to) {
-    const meta = loadMeta(repoRoot);
-    if (meta && commitOid(meta.head) && commitOid(meta.head) !== commitOid(opts.to)) {
-      rememberCommitTable(repoRoot, meta.head, loadTable(repoRoot), includeLibs);
-    }
-    const cached = recallCommitTable(repoRoot, opts.to, includeLibs);
-    if (cached) {
-      const metaHit = saveTableUnlocked(repoRoot, cached);
-      rememberCommitTable(repoRoot, opts.to, cached, includeLibs);
+    const wide = diffIsWide(changedSourceCount(repoRoot, opts.from, opts.to), Object.keys(loadTable(repoRoot)).length);
+    const known = await projectTable(repoRoot, skipLib, true);
+    if (known) {
+      if (!wide) keepEditedEncodings(repoRoot, opts.from, opts.to, known.files);
+      const metaNow = loadMeta(repoRoot);
+      const unchanged = !!(metaNow && commitOid(metaNow.head) === commitOid(opts.to) && mapsEqual(loadTable(repoRoot), known.files));
+      const metaHit = unchanged ? metaNow : saveTableUnlocked(repoRoot, known.files);
       recordPerf(repoRoot, 'zkz-native.buildEncodingTable', {
         ms: Number(process.hrtime.bigint() - perfStart) / 1e6,
-        files: Object.keys(cached).length,
+        files: Object.keys(known.files).length,
         incremental: true,
         cacheHit: true,
         includeLibs: includeLibs
       });
-      return { files: cached, meta: metaHit, counts: countByKind(cached), incremental: true, cacheHit: true };
+      return { files: known.files, meta: metaHit, counts: countByKind(known.files), incremental: true, cacheHit: true };
+    }
+    if (!wide) {
+      const hit = await buildTableIncremental(repoRoot, opts.from, opts.to, skipLib);
+      if (hit) {
+        recordPerf(repoRoot, 'zkz-native.buildEncodingTable', {
+          ms: Number(process.hrtime.bigint() - perfStart) / 1e6,
+          files: Object.keys(hit.files || {}).length,
+          incremental: true,
+          cacheHit: false,
+          includeLibs: includeLibs
+        });
+        hit.cacheHit = false;
+        return hit;
+      }
     }
   }
-  if (!force && opts && opts.from && opts.to) {
-    const hit = await buildTableIncremental(repoRoot, opts.from, opts.to, skipLib);
-    if (hit) {
-      rememberCommitTable(repoRoot, opts.to || currentHead(repoRoot), hit.files, includeLibs);
-      recordPerf(repoRoot, 'zkz-native.buildEncodingTable', {
-        ms: Number(process.hrtime.bigint() - perfStart) / 1e6,
-        files: Object.keys(hit.files || {}).length,
-        incremental: true,
-        cacheHit: false,
-        includeLibs: includeLibs
-      });
-      hit.cacheHit = false;
-      return hit;
-    }
-  }
-  const paths = listSourceFiles(repoRoot).map(slashRel).filter((p) => {
-    if (skipLib && isLibRel(repoRoot, p)) return false;
-    return true;
-  });
-  const files = emptyTable();
-  await fillKinds(repoRoot, files, paths);
-  const meta = saveTableUnlocked(repoRoot, files);
-  rememberCommitTable(repoRoot, (opts && opts.to) || currentHead(repoRoot), files, includeLibs);
+  const projected = await projectTable(repoRoot, skipLib, false);
+  const meta = saveTableUnlocked(repoRoot, projected.files);
   recordPerf(repoRoot, 'zkz-native.buildEncodingTable', {
     ms: Number(process.hrtime.bigint() - perfStart) / 1e6,
-    files: Object.keys(files).length,
+    files: Object.keys(projected.files).length,
     incremental: false,
     cacheHit: false,
     includeLibs: !skipLib
   });
-  return { files: files, meta: meta, counts: countByKind(files) };
+  return { files: projected.files, meta: meta, counts: countByKind(projected.files), incremental: false };
 }
 
 module.exports = {

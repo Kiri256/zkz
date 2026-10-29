@@ -29,5 +29,6 @@ if __name__ == "__main__":
         "observe.js",
         "lock.js",
         "head_watch.js",
+        "load_shared.js",
         "extension.js",
     )))

@@ -2,7 +2,8 @@
 
 const path = require('path');
 const vscode = require('vscode');
-const { folderForRoot } = require('../../shared/project_root');
+const loadShared = require('./load_shared');
+const { folderForRoot } = loadShared('project_root');
 
 const ACTIONS = [
   { action: 'build', name: 'Keil Build', group: 'build', title: '编译', listed: true },
@@ -92,7 +93,7 @@ function taskFolder() {
   const folders = vscode.workspace.workspaceFolders || [];
   if (!folders.length) return undefined;
   let root = '';
-  try { root = require('./pair').resolvePair().root; } catch (_) { return undefined; }
+  try { root = loadShared('pair').resolvePair().root; } catch (_) { return undefined; }
   const chosen = folderForRoot(folders.map(function (f) { return f.uri.fsPath; }), root);
   const want = path.resolve(chosen).toLowerCase();
   for (let i = 0; i < folders.length; i++) {

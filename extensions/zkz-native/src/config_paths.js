@@ -2,7 +2,8 @@
 
 const fs = require('fs');
 const { configPathsFile, slashRel } = require('./paths');
-const settings = require('../../shared/zkz_settings');
+const loadShared = require('./load_shared');
+const settings = loadShared('zkz_settings');
 
 const DEFAULT_PATHS = {
   paths: settings.DEFAULTS.native.paths.slice()

@@ -1,0 +1,26 @@
+---
+description: 三个扩展的边界、打包、缓存和注释
+globs: extensions/**/*
+alwaysApply: false
+---
+
+# 扩展
+
+三个包各自独立：`zkz-native`（编码与编烧树）、`zkz-code`（宏表、折叠、clangd）、`zkz-keil`（UV4、J-Link、Cortex-Debug）。扩展之间只走公开命令。工程根、Keil 布局、工程根解析和设置在 `extensions/shared/`。扩展源码用同目录的 `load_shared.js`：`loadShared('模块名')`。这个函数从本文件所在目录向上找 `shared/<名>.js`。源码树命中 `extensions/shared/`，装进扩展后命中 `src/shared/`。三份 `src/load_shared.js` 内容相同。
+
+打包不再改写 require。`src/` 里直接 `require('../../shared/...')` 或 `require('./shared/...')` 时打包失败。`extensions/package_zkz_*.py` 按白名单拷 `src/`，并按 `loadShared('名')` 把共享文件拷进 vsix 的 `src/shared/`。共享文件里 `require('./别的')` 的依赖一并拷走。新增或改名 JS、JSON 时，同步改对应打包脚本。测试只在仓库里跑，仍可 `require('../../shared/<名>')`。
+
+## 缓存
+
+内存是工作副本，文件只做持久化。命中不改持久化文件。算出新结果先改内存，再写文件。
+
+- 设置按文件状态做内存缓存，读出的是副本。
+- `zkz-native` 编码按 blob 留在进程内，文件是 `.zkz/run/encoding-by-blob.json`。同一份内容判定过就直接用。路径上手工指定的编码单独记在 `.zkz/run/encoding-path-override.json`。换提交时，当前编码表文件写一次，给下一个过滤进程读。编烧树正文留在 `.zkz/keil-native` 和 `.zkz/run/keil-cache/<提交号>/tree`。源文件和工作区一致时戳用 blob，改过的工作区仍用文件时间。命中时改名对调，不把文件内容读进内存。
+- `zkz-code` 的宏表、折叠留在内存。`compile_commands` 先用内存，没有再读 `.zkz/run/compile-commands-cache.json`，都没有才解析工程并写回两处。
+- `zkz-keil` 不缓存编译、烧录和硬件状态。
+
+## 注释和测试
+
+新写或改到的函数用中文写一行：用途、返回值、扩展宿主线程调用。
+
+在对应包目录跑 `node test/run.js`。用户可见行为和 README 不一致时，一起改 README。

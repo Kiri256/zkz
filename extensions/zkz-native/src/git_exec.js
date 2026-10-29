@@ -149,6 +149,18 @@ function commonGitDir(gitDir) {
   return gitDir;
 }
 
+// 这份工作区的 git 目录。attributes 和 exclude 写在这里。返回绝对路径。扩展宿主线程调用。
+function infoGitDir(repoRoot) {
+  return gitDirOf(repoRoot) || path.join(repoRoot, '.git');
+}
+
+// 钩子所在的公共 git 目录。附加工作区的 .git 是文件，钩子不在那份工作区目录里。返回绝对路径。扩展宿主线程调用。
+function hooksGitDir(repoRoot) {
+  const gitDir = gitDirOf(repoRoot);
+  if (!gitDir) return path.join(repoRoot, '.git');
+  return commonGitDir(gitDir);
+}
+
 // HEAD、分支 loose ref、packed-refs。同分支提交只改 refs/heads，不改 HEAD。
 function refWatchPaths(repoRoot) {
   const gitDir = gitDirOf(repoRoot);
@@ -520,6 +532,8 @@ module.exports = {
   readHeadName,
   readHeadOid,
   gitDirOf,
+  infoGitDir,
+  hooksGitDir,
   refWatchPaths,
   listSourceFiles,
   catFileBatch,

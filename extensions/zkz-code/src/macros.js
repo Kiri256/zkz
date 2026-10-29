@@ -4,6 +4,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const loadShared = require('./load_shared');
 const { evalPpExpr, evalPpExprResult } = require('./pp_expr');
 
 function vscodeApi() {
@@ -334,7 +335,7 @@ function getYtVersionText(filePath) {
 }
 
 function inferWorkspaceRoot(filePath) {
-  const { findProjectRoot } = require('../../shared/project_root');
+  const { findProjectRoot } = loadShared('project_root');
   try {
     const vscode = vscodeApi();
     const folders = (vscode && vscode.workspace && vscode.workspace.workspaceFolders) || [];
@@ -352,7 +353,7 @@ function inferWorkspaceRoot(filePath) {
  */
 function resolveMacroRoot(filePath) {
   try {
-    const pair = require('./pair').resolvePair(filePath || '');
+    const pair = loadShared('pair').resolvePair(filePath || '');
     if (pair && pair.root) return pair.root;
   } catch (_) { /* 未打开工作区时再按文件向上找 */ }
   return inferWorkspaceRoot(filePath || '');

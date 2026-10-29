@@ -3,7 +3,8 @@
 const vscode = require('vscode');
 const ifdefFold = require('./ifdef_fold');
 const status = require('./status');
-const { resolvePair } = require('./pair');
+const loadShared = require('./load_shared');
+const { resolvePair } = loadShared('pair');
 const { restoreCmsis } = require('./cmsis');
 
 function activate(context) {
@@ -22,7 +23,7 @@ function activate(context) {
     }
   }));
   const ensureSettings = () => {
-    try { require('../../shared/zkz_settings').ensure(resolvePair().root); } catch (_) { /* unpaired */ }
+    try { loadShared('zkz_settings').ensure(resolvePair().root); } catch (_) { /* unpaired */ }
   };
   ensureSettings();
   context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(ensureSettings));

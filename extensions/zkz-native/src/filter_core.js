@@ -77,14 +77,13 @@ function clean(pathname, wtBytes, table, repoRoot, isLibraryPath) {
   let mapped = lookupKind(table, pathname);
   if (!mapped && repoRoot && pathname) {
     const disk = mappingOf(repoRoot, pathname);
-    const fromGit = trackedMapping(repoRoot, pathname);
-    const diskKind = parseMapped(disk).kind;
-    const gitKind = parseMapped(fromGit).kind;
-    if (disk && !(gitKind === 'Gbk' && diskKind !== 'Gbk')) {
+    if (disk) {
+      // 磁盘表已有这项就用它。内存表缺一项时不再逐个读 blob。
       mapped = disk;
       remember(table, pathname, disk);
-    } else if (fromGit) {
-      mapped = bindMapping(table, repoRoot, pathname, fromGit, diskKind && diskKind !== 'Gbk');
+    } else {
+      const fromGit = trackedMapping(repoRoot, pathname);
+      if (fromGit) mapped = bindMapping(table, repoRoot, pathname, fromGit, false);
     }
   }
   if (!mapped) {
