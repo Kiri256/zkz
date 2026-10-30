@@ -15,7 +15,7 @@ alwaysApply: false
 内存是工作副本，文件只做持久化。命中不改持久化文件。算出新结果先改内存，再写文件。
 
 - 设置按文件状态做内存缓存，读出的是副本。
-- `zkz-native` 编码按 blob 留在进程内，文件是 `.zkz/run/encoding-by-blob.json`。同一份内容判定过就直接用。路径上手工指定的编码单独记在 `.zkz/run/encoding-path-override.json`。换提交时，当前编码表文件写一次，给下一个过滤进程读。编烧树正文留在 `.zkz/keil-native` 和 `.zkz/run/keil-cache/<提交号>/tree`。源文件和工作区一致时戳用 blob，改过的工作区仍用文件时间。命中时改名对调，不把文件内容读进内存。
+- `zkz-native` 编码按 blob 留在进程内，文件是 `.zkz/run/encoding-by-blob.json`。同一份内容判定过就直接用。路径上手工指定的编码单独记在 `.zkz/run/encoding-path-override.json`。换提交时，当前编码表文件写一次，给下一个过滤进程读。同分支新提交只改表里的提交号。编烧树正文留在 `.zkz/keil-native`。换提交的缓存是清单：和 blob 一致的文件不复制，其余放在 `.zkz/run/keil-cache/<提交号>/extra`。旧的整棵 `tree` 仍可换上。源文件和工作区一致时戳用 blob，改过的工作区仍用文件时间。同一提交上索引里的 blob 没变时，没被点名的已跟踪源文件不再逐个 stat；工作区改动只重写点名的路径。改动和未跟踪文件同一次列出。索引只刷新了时间也算 blob 没变。已暂存且 blob 变了仍整批取戳。命中时改名对调，不把文件内容读进内存。
 - `zkz-code` 的宏表、折叠留在内存。`compile_commands` 先用内存，没有再读 `.zkz/run/compile-commands-cache.json`，都没有才解析工程并写回两处。
 - `zkz-keil` 不缓存编译、烧录和硬件状态。
 

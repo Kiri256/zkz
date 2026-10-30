@@ -88,6 +88,30 @@ function noteTableRef(repoRoot, meta) {
   return meta;
 }
 
+// 同分支新提交只改编码表里的提交号，不重算每个文件。表不存在或提交号不合法则不动。扩展宿主调用。
+function noteTableHead(repoRoot, head) {
+  const want = commitOid(head);
+  if (!want) return null;
+  const lockDir = acquireLock(repoRoot, 'encoding-table');
+  try {
+    if (gTableCache.root === repoRoot) {
+      gTableCache.map = null;
+      gTableCache.meta = null;
+    }
+    const meta = loadMeta(repoRoot);
+    if (!meta || !meta.files || typeof meta.files !== 'object') return null;
+    if (commitOid(meta.head) === want) return meta;
+    meta.head = want;
+    atomicWriteJson(tablePath(repoRoot), meta);
+    if (gTableCache.root === repoRoot && gTableCache.meta === meta) {
+      gTableCache.mtime = tableStamp(tablePath(repoRoot));
+    }
+    return meta;
+  } finally {
+    releaseLock(lockDir);
+  }
+}
+
 function mappingOf(repoRoot, pathname) {
   if (!repoRoot || !pathname) return '';
   const files = loadTable(repoRoot);
@@ -505,6 +529,7 @@ module.exports = {
   loadTable,
   loadMeta,
   noteTableRef,
+  noteTableHead,
   mappingOf,
   noteNewFile,
   saveTable,

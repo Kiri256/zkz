@@ -17,13 +17,42 @@ function hasUtf8Bom(buf) {
   return !!(buf && buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF);
 }
 
-function isStrictUtf8(buf) {
-  try {
-    new TextDecoder('utf-8', { fatal: true }).decode(buf);
-    return true;
-  } catch (_) {
-    return false;
+// 从 start 起判断是不是严格 UTF-8。非法序列返回 Gbk，纯 ASCII 返回 Ascii，否则 Utf8。不分配字符串。
+function utf8Class(buf, start) {
+  let i = start || 0;
+  let nonAscii = false;
+  while (i < buf.length) {
+    const b = buf[i];
+    if (b <= 0x7F) { i += 1; continue; }
+    nonAscii = true;
+    let need = 0;
+    if (b >= 0xC2 && b <= 0xDF) need = 1;
+    else if (b === 0xE0) need = 2;
+    else if (b >= 0xE1 && b <= 0xEC) need = 2;
+    else if (b === 0xED) need = 2;
+    else if (b >= 0xEE && b <= 0xEF) need = 2;
+    else if (b === 0xF0) need = 3;
+    else if (b >= 0xF1 && b <= 0xF3) need = 3;
+    else if (b === 0xF4) need = 3;
+    else return 'Gbk';
+    if (i + need >= buf.length) return 'Gbk';
+    const b1 = buf[i + 1];
+    if ((b1 & 0xC0) !== 0x80) return 'Gbk';
+    if (b === 0xE0 && b1 < 0xA0) return 'Gbk';
+    if (b === 0xED && b1 >= 0xA0) return 'Gbk';
+    if (b === 0xF0 && b1 < 0x90) return 'Gbk';
+    if (b === 0xF4 && b1 >= 0x90) return 'Gbk';
+    for (let k = 2; k <= need; k++) {
+      if ((buf[i + k] & 0xC0) !== 0x80) return 'Gbk';
+    }
+    i += 1 + need;
   }
+  return nonAscii ? 'Utf8' : 'Ascii';
+}
+
+function isStrictUtf8(buf) {
+  if (!buf || !buf.length) return true;
+  return utf8Class(buf, 0) !== 'Gbk';
 }
 
 function hasNonAscii(buf) {
@@ -34,12 +63,14 @@ function hasNonAscii(buf) {
   return false;
 }
 
-/** Utf8Bom / Utf8 / Ascii / Gbk */
+// 一次扫描判断编码。非法 UTF-8 立刻当 GBK，不把整文件解码成字符串。返回种类。过滤进程和扩展宿主调用。
 function detectKind(buf) {
   if (!buf || !buf.length) return 'Ascii';
-  if (hasUtf8Bom(buf)) return isStrictUtf8(buf) ? 'Utf8Bom' : 'Gbk';
-  if (isStrictUtf8(buf)) return hasNonAscii(buf) ? 'Utf8' : 'Ascii';
-  return 'Gbk';
+  if (hasUtf8Bom(buf)) {
+    const rest = utf8Class(buf, 3);
+    return rest === 'Gbk' ? 'Gbk' : 'Utf8Bom';
+  }
+  return utf8Class(buf, 0);
 }
 
 function normalizeCp936Text(text) {

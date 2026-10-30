@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawnSync, spawn } = require('child_process');
 const { Worker } = require('worker_threads');
 const { slashRel } = require('./paths');
@@ -234,7 +235,19 @@ function readHeadOid(repoRoot) {
   return readPackedOid(gitDir, ref);
 }
 
-const gIndexCache = { root: '', mtime: 0, size: 0, map: null };
+const gIndexCache = { root: '', mtime: 0, size: 0, map: null, blobs: '' };
+
+// 索引文件的大小和时间。变了说明暂存区改过。读不到返回空串。扩展宿主调用。
+function indexIdentity(repoRoot) {
+  const gitDir = gitDirOf(repoRoot);
+  if (!gitDir) return '';
+  try {
+    const st = fs.statSync(path.join(gitDir, 'index'));
+    return st.size + '|' + st.mtimeMs;
+  } catch (_) {
+    return '';
+  }
+}
 
 /** 读索引里 stage 0 的 blob oid。索引读不到返回 null；没有 stage 0 返回空串。不启动 git。 */
 function indexBlobOid(repoRoot, rel) {
@@ -260,7 +273,26 @@ function indexOidMap(repoRoot) {
   gIndexCache.mtime = st.mtimeMs;
   gIndexCache.size = st.size;
   gIndexCache.map = map;
+  gIndexCache.blobs = '';
   return map;
+}
+
+// 索引里 stage 0 的路径和 blob。只刷新文件时间不会变。读不到索引返回空串。扩展宿主调用。
+function indexBlobFingerprint(repoRoot) {
+  const map = indexOidMap(repoRoot);
+  if (!map) return '';
+  if (gIndexCache.map === map && gIndexCache.blobs) return gIndexCache.blobs;
+  const names = Array.from(map.keys()).sort();
+  const hash = crypto.createHash('sha256');
+  for (let i = 0; i < names.length; i++) {
+    hash.update(names[i]);
+    hash.update('\0');
+    hash.update(String(map.get(names[i]) || ''));
+    hash.update('\0');
+  }
+  const digest = hash.digest('hex');
+  if (gIndexCache.map === map) gIndexCache.blobs = digest;
+  return digest;
 }
 
 // 索引 v4 路径压缩用的变长整数。和 Git 的 decode_varint 一致。
@@ -540,5 +572,7 @@ module.exports = {
   catFileBatchSync,
   tryCatFileBatch,
   indexBlobOid,
+  indexBlobFingerprint,
+  indexIdentity,
   closeCatSessions
 };

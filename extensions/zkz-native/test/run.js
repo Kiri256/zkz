@@ -98,7 +98,63 @@ test('sync restores a reverted edit even when a different file stays dirty', () 
     git(['restore', '--', 'User/b.c']);
     syncKeilTree(root);
     assert.strictEqual(fs.readFileSync(path.join(kn, 'b.c'), 'utf8'), 'int b;\n');
-    assert.strictEqual(syncKeilTree(root).cacheHit, true);
+    const reuseHit = syncKeilTree(root);
+    assert.strictEqual(reuseHit.cacheHit, true);
+    assert.strictEqual(reuseHit.sourceReuse, true);
+    const indexFile = path.join(root, '.git', 'index');
+    const later = new Date(Date.now() + 10000);
+    fs.utimesSync(indexFile, later, later);
+    const refreshed = syncKeilTree(root);
+    assert.strictEqual(refreshed.cacheHit, true);
+    assert.strictEqual(refreshed.sourceReuse, true);
+    fs.writeFileSync(a, 'int staged;\n');
+    git(['add', '--', 'User/a.c']);
+    const staged = syncKeilTree(root);
+    assert.strictEqual(staged.sourceReuse, false);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'a.c'), 'utf8'), 'int staged;\n');
+    git(['restore', '--staged', '--worktree', '--', 'User/a.c']);
+    syncKeilTree(root);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'a.c'), 'utf8'), 'int a;\n');
+    fs.writeFileSync(a, 'int one;\n');
+    const statOne = fs.statSync;
+    let sawB = false;
+    fs.statSync = function (p, ...args) {
+      if (p === b) sawB = true;
+      return statOne.call(this, p, ...args);
+    };
+    let one;
+    try { one = syncKeilTree(root); } finally { fs.statSync = statOne; }
+    assert.strictEqual(one.sourceReuse, true);
+    assert.strictEqual(one.written, 1);
+    assert.strictEqual(sawB, false);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'a.c'), 'utf8'), 'int one;\n');
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'b.c'), 'utf8'), 'int b;\n');
+    fs.writeFileSync(a, 'int a;\n');
+    const undone = syncKeilTree(root);
+    assert.strictEqual(undone.sourceReuse, true);
+    assert.strictEqual(undone.written, 1);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'a.c'), 'utf8'), 'int a;\n');
+    const neu = path.join(root, 'User', 'n.c');
+    fs.writeFileSync(neu, 'int n;\n');
+    const added = syncKeilTree(root);
+    assert.strictEqual(added.sourceReuse, true);
+    assert.strictEqual(fs.readFileSync(path.join(kn, 'n.c'), 'utf8'), 'int n;\n');
+    fs.unlinkSync(neu);
+    const dropped = syncKeilTree(root);
+    assert.strictEqual(dropped.sourceReuse, true);
+    assert.strictEqual(fs.existsSync(path.join(kn, 'n.c')), false);
+    const stat = fs.statSync;
+    try {
+      fs.statSync = function (p, ...args) {
+        if (p === a) {
+          const err = new Error('clean tracked source was stated');
+          err.code = 'EACCES';
+          throw err;
+        }
+        return stat.call(this, p, ...args);
+      };
+      assert.strictEqual(syncKeilTree(root).cacheHit, true);
+    } finally { fs.statSync = stat; }
     const target = path.join(kn, 'a.c');
     const targetTime = fs.statSync(target).mtime;
     fs.writeFileSync(target, 'int z;\n');
@@ -2787,8 +2843,11 @@ test('keil branch switch rewrites only files that changed', () => {
     assert.strictEqual(fs.readFileSync(path.join(kn, 'b.c'), 'utf8'), 'int changed;\n');
     assert.strictEqual(fs.existsSync(path.join(kn, 'c.c')), false);
     const baseOid = git(['rev-parse', 'base']).trim();
-    const cachedFlash = path.join(dir, '.zkz', 'run', 'keil-cache', baseOid, 'tree', 'Project', 'MDK-ARM(uV4)', 'Flash', 'a.o');
-    assert.strictEqual(fs.existsSync(cachedFlash), false);
+    const cachedSlot = path.join(dir, '.zkz', 'run', 'keil-cache', baseOid);
+    assert.strictEqual(fs.existsSync(path.join(cachedSlot, 'tree')), false);
+    const parked = JSON.parse(fs.readFileSync(path.join(cachedSlot, 'stamp.json'), 'utf8'));
+    assert.strictEqual(parked.manifest, true);
+    assert.strictEqual(parked.extras.length, 0);
     assert.strictEqual(fs.existsSync(flash), true);
     assert.strictEqual(syncKeilTree(dir).cacheHit, true);
     git(['checkout', '-q', baseBranch]);
@@ -2798,6 +2857,105 @@ test('keil branch switch rewrites only files that changed', () => {
     assert.strictEqual(fs.readFileSync(path.join(kn, 'a.c'), 'utf8'), 'int a;\n');
     assert.strictEqual(fs.readFileSync(path.join(kn, 'b.c'), 'utf8'), 'int b;\n');
     assert.strictEqual(fs.readFileSync(path.join(kn, 'c.c'), 'utf8'), 'int c;\n');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('legacy keil tree cache swaps even if its stamp says manifest', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { syncKeilTree } = require('../src/keil_tree');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-keil-tree-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: dir, windowsHide: true, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+    return String(r.stdout || '');
+  };
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'false']);
+    git(['checkout', '-q', '-b', 'base']);
+    fs.mkdirSync(path.join(dir, 'User'));
+    fs.writeFileSync(path.join(dir, 'User', 'a.c'), 'int a;\n');
+    git(['add', 'User']);
+    git(['commit', '-q', '-m', 'base']);
+    const baseOid = git(['rev-parse', 'HEAD']).trim();
+    const blob = git(['rev-parse', 'HEAD:User/a.c']).trim();
+    syncKeilTree(dir);
+    git(['checkout', '-q', '-b', 'other']);
+    fs.writeFileSync(path.join(dir, 'User', 'a.c'), 'int other;\n');
+    git(['add', 'User/a.c']);
+    git(['commit', '-q', '-m', 'other']);
+    syncKeilTree(dir);
+    const slot = path.join(dir, '.zkz', 'run', 'keil-cache', baseOid);
+    fs.rmSync(slot, { recursive: true, force: true });
+    const treeFile = path.join(slot, 'tree', 'User', 'a.c');
+    fs.mkdirSync(path.dirname(treeFile), { recursive: true });
+    fs.writeFileSync(treeFile, 'int fromtree;\n');
+    fs.writeFileSync(path.join(slot, 'tree', '.zkz-sync-ready'), 'ready\n');
+    fs.writeFileSync(path.join(slot, 'stamp.json'), JSON.stringify({
+      version: 5,
+      head: baseOid,
+      branch: 'base',
+      complete: true,
+      manifest: true,
+      files: { 'User/a.c': 'b:' + blob },
+      targets: { 'User/a.c': '0|0|0|0' },
+      libraryFiles: {}
+    }));
+    git(['checkout', '-q', 'base']);
+    const back = syncKeilTree(dir);
+    assert.strictEqual(back.cacheHit, true);
+    assert.strictEqual(fs.readFileSync(path.join(dir, '.zkz', 'keil-native', 'User', 'a.c'), 'utf8'), 'int fromtree;\n');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('cold keil cache copies only files that are not git blobs', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { syncKeilTree } = require('../src/keil_tree');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-keil-extra-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: dir, windowsHide: true, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+    return String(r.stdout || '');
+  };
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'false']);
+    git(['checkout', '-q', '-b', 'base']);
+    fs.mkdirSync(path.join(dir, 'User'));
+    fs.writeFileSync(path.join(dir, 'User', 'a.c'), 'int a;\n');
+    fs.writeFileSync(path.join(dir, 'User', 'b.c'), 'int b;\n');
+    git(['add', 'User']);
+    git(['commit', '-q', '-m', 'base']);
+    syncKeilTree(dir);
+    fs.writeFileSync(path.join(dir, 'User', 'a.c'), 'int dirty;\n');
+    syncKeilTree(dir);
+    git(['checkout', '-q', '-b', 'other']);
+    fs.writeFileSync(path.join(dir, 'User', 'b.c'), 'int b2;\n');
+    git(['add', 'User/b.c']);
+    git(['commit', '-q', '-m', 'b']);
+    syncKeilTree(dir);
+    const baseOid = git(['rev-parse', 'base']).trim();
+    const slot = path.join(dir, '.zkz', 'run', 'keil-cache', baseOid);
+    assert.strictEqual(fs.existsSync(path.join(slot, 'tree')), false);
+    assert.strictEqual(fs.readFileSync(path.join(slot, 'extra', 'User', 'a.c'), 'utf8'), 'int dirty;\n');
+    git(['checkout', '-q', '-f', 'base']);
+    syncKeilTree(dir);
+    assert.strictEqual(fs.readFileSync(path.join(dir, '.zkz', 'keil-native', 'User', 'a.c'), 'utf8'), 'int a;\n');
+    assert.strictEqual(fs.readFileSync(path.join(dir, '.zkz', 'keil-native', 'User', 'b.c'), 'utf8'), 'int b;\n');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -2907,6 +3065,28 @@ test('library warning for one file does not erase another', () => {
   assert.strictEqual(left.length, 1);
   assert.strictEqual(left[0].rel, 'Libraries/a.c');
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('same-branch encoding table records the new commit without rewriting files', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const { saveTable, loadMeta, loadTable, noteTableHead } = require('../src/enc_table');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-table-head-'));
+  try {
+    saveTable(root, { 'User/a.c': 'Utf8' });
+    const file = path.join(root, '.zkz', 'run', '.workspace_source_encodings.json');
+    const obj = JSON.parse(fs.readFileSync(file, 'utf8'));
+    obj.head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    obj.ref = 'refs/heads/main';
+    fs.writeFileSync(file, JSON.stringify(obj));
+    const next = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    noteTableHead(root, next);
+    assert.strictEqual(loadMeta(root).head, next);
+    assert.strictEqual(loadTable(root)['User/a.c'], 'Utf8');
+    noteTableHead(root, next);
+    assert.strictEqual(loadMeta(root).head, next);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 runAsync();

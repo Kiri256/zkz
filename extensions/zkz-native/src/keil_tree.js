@@ -4,12 +4,12 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { clean } = require('./filter_core');
-const { loadTable, loadMeta, setNoteDefer, flushDeferredNotes } = require('./enc_table');
+const { loadTable, setNoteDefer, flushDeferredNotes } = require('./enc_table');
 const {
   slashRel, keilNativeRoot, keilStampPath, isSourceExt,
   DEFAULT_SKIP_DIR, libTops, libTopNames, createLibMatcher, isReparse, atomicWriteJson
 } = require('./paths');
-const { currentHead, currentBranch, gitText, git, indexBlobOid } = require('./git_exec');
+const { currentHead, currentBranch, gitText, git, indexBlobOid, indexBlobFingerprint, indexIdentity, catFileBatchSync } = require('./git_exec');
 const { acquireLock, releaseLock } = require('./lock');
 const { inspectLibEncoding, formatLibWarning, loadLibWarnings, saveLibWarnings } = require('./lib_encoding');
 const loadShared = require('./load_shared');
@@ -153,49 +153,12 @@ function commitOid(value) {
   return /^[0-9a-f]{40}$/.test(oid) ? oid : '';
 }
 
-// 检出后编码表可能晚到。目录比对期间等到这份提交的表落盘，再拿来用。
-function loadSettledTable(repoRoot, head) {
-  const want = commitOid(head);
-  const started = Date.now();
-  let table = null;
-  for (; ;) {
-    const held = acquireLock(repoRoot, 'encoding-table');
-    try {
-      table = loadTable(repoRoot);
-      const meta = loadMeta(repoRoot);
-      const got = meta && commitOid(meta.head);
-      if (!want || !got || got === want) return table;
-    } finally {
-      releaseLock(held);
-    }
-    if (Date.now() - started >= 2000) return table;
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 40);
-  }
-}
-
 function keilCacheRoot(repoRoot) {
   return path.join(path.dirname(keilStampPath(repoRoot)), 'keil-cache');
 }
 
 function keilCacheSlot(repoRoot, oid) {
   return path.join(keilCacheRoot(repoRoot), oid);
-}
-
-// 库是 junction，拷进缓存会把库本体再复制一份。Flash 等编译产物也不进缓存，留在当前这棵树上。
-function copyTreeFiles(src, dst) {
-  fs.mkdirSync(dst, { recursive: true });
-  const ents = fs.readdirSync(src, { withFileTypes: true });
-  for (let i = 0; i < ents.length; i++) {
-    const ent = ents[i];
-    if (skipDirName(ent.name)) continue;
-    const from = path.join(src, ent.name);
-    const to = path.join(dst, ent.name);
-    if (isReparse(from)) continue;
-    let st = null;
-    try { st = fs.lstatSync(from); } catch (_) { continue; }
-    if (st.isDirectory()) copyTreeFiles(from, to);
-    else if (st.isFile()) fs.copyFileSync(from, to);
-  }
 }
 
 // 读本进程里的编烧缓存顺序。没有就读文件。返回提交号数组。扩展宿主调用。
@@ -242,20 +205,46 @@ function rememberKeilOrder(repoRoot, oid, pin) {
   storeKeilOrder(repoRoot, order);
 }
 
-function keilCacheReady(repoRoot, oid) {
-  const slot = keilCacheSlot(repoRoot, oid);
-  return fs.existsSync(path.join(slot, 'tree', SYNC_READY_FILE))
-    && fs.existsSync(path.join(slot, 'stamp.json'));
+function cachedStamp(repoRoot, oid) {
+  return readJson(path.join(keilCacheSlot(repoRoot, oid), 'stamp.json'), null);
 }
 
-function parkKeilCopy(repoRoot, oid, kn, stamp, pin) {
+function fullTreeReady(repoRoot, oid) {
+  const cached = cachedStamp(repoRoot, oid);
+  if (!cached || cached.complete !== true || cached.version !== SYNC_VERSION) return false;
+  // 整棵 tree 在，就按树换。戳上残留的 manifest 不能把这份树丢掉。
+  return fs.existsSync(path.join(keilCacheSlot(repoRoot, oid), 'tree', SYNC_READY_FILE));
+}
+
+function manifestReady(repoRoot, oid) {
+  const cached = cachedStamp(repoRoot, oid);
+  return !!(cached && cached.manifest === true && cached.complete === true && cached.version === SYNC_VERSION);
+}
+
+function cacheFile(root, rel) {
+  return path.join(root, ...slashRel(rel).split('/'));
+}
+
+// 不是 git blob 的编烧副本才需要另存。blob 以后用 git 取回。扩展宿主调用。
+function parkKeilManifest(repoRoot, oid, kn, stamp, pin, isLibraryPath) {
   const slot = keilCacheSlot(repoRoot, oid);
   const tmp = slot + '.tmp';
   fs.rmSync(tmp, { recursive: true, force: true });
-  fs.mkdirSync(path.join(tmp, 'tree'), { recursive: true });
+  fs.mkdirSync(tmp, { recursive: true });
+  const extras = [];
   try {
-    copyTreeFiles(kn, path.join(tmp, 'tree'));
-    writeJson(path.join(tmp, 'stamp.json'), stamp);
+    Object.keys(stamp.files || {}).forEach((rel) => {
+      if (blobStamp(stamp.files[rel]) || skipSyncPath(rel) || isLibraryPath(rel)) return;
+      const src = cacheFile(kn, rel);
+      let st = null;
+      try { st = fs.statSync(src); } catch (_) { return; }
+      if (!st.isFile()) return;
+      const dst = cacheFile(path.join(tmp, 'extra'), rel);
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.copyFileSync(src, dst);
+      extras.push(rel);
+    });
+    writeJson(path.join(tmp, 'stamp.json'), Object.assign({}, stamp, { manifest: true, extras: extras }));
     fs.rmSync(slot, { recursive: true, force: true });
     fs.renameSync(tmp, slot);
   } catch (err) {
@@ -265,12 +254,66 @@ function parkKeilCopy(repoRoot, oid, kn, stamp, pin) {
   rememberKeilOrder(repoRoot, oid, pin);
 }
 
+function writeKeilBytes(repoRoot, kn, rel, bytes) {
+  ensureRealParent(repoRoot, kn, rel);
+  const dst = cacheFile(kn, rel);
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  fs.writeFileSync(dst, bytes);
+}
+
+// 按清单把编烧树补成那个提交。相同的戳留着，变了的从 git 或 extra 取。成功返回清单。扩展宿主调用。
+function applyKeilManifest(repoRoot, kn, fromStamp, oid, isLibraryPath) {
+  const slot = keilCacheSlot(repoRoot, oid);
+  const cached = cachedStamp(repoRoot, oid);
+  if (!cached || cached.manifest !== true || cached.complete !== true || cached.version !== SYNC_VERSION) return null;
+  const fromFiles = (fromStamp && fromStamp.files) || {};
+  const toFiles = cached.files || {};
+  Object.keys(fromFiles).forEach((rel) => {
+    if (toFiles[rel] || skipSyncPath(rel) || isLibraryPath(rel)) return;
+    const dst = cacheFile(kn, rel);
+    try {
+      if (fs.existsSync(dst) && fs.statSync(dst).isFile()) fs.unlinkSync(dst);
+    } catch (_) { /* ignore */ }
+  });
+  const jobs = [];
+  const copies = [];
+  Object.keys(toFiles).forEach((rel) => {
+    if (skipSyncPath(rel) || isLibraryPath(rel)) return;
+    if (fromFiles[rel] && fromFiles[rel] === toFiles[rel]) {
+      try {
+        if (fs.statSync(cacheFile(kn, rel)).isFile()) return;
+      } catch (_) { /* 目标不是文件，按缺失重新取出 */ }
+    }
+    if (blobStamp(toFiles[rel])) jobs.push({ rel: rel, oid: toFiles[rel].slice(2) });
+    else copies.push(rel);
+  });
+  if (jobs.length) {
+    const recs = catFileBatchSync(repoRoot, jobs.map((job) => job.oid));
+    for (let i = 0; i < jobs.length; i++) {
+      const rec = recs[i];
+      if (!rec || rec.missing) return null;
+      writeKeilBytes(repoRoot, kn, jobs[i].rel, rec.data);
+    }
+  }
+  for (let i = 0; i < copies.length; i++) {
+    const rel = copies[i];
+    const src = cacheFile(path.join(slot, 'extra'), rel);
+    if (!fs.existsSync(src)) continue;
+    writeKeilBytes(repoRoot, kn, rel, fs.readFileSync(src));
+  }
+  return cached;
+}
+
 function parkKeilRename(repoRoot, oid, kn, stamp, pin) {
   const slot = keilCacheSlot(repoRoot, oid);
   fs.rmSync(slot, { recursive: true, force: true });
   fs.mkdirSync(slot, { recursive: true });
   fs.renameSync(kn, path.join(slot, 'tree'));
-  writeJson(path.join(slot, 'stamp.json'), stamp);
+  // 整棵树自己就是正文。清掉清单标记，避免下次把 tree 当成没有副本的清单。
+  const parked = Object.assign({}, stamp);
+  delete parked.manifest;
+  delete parked.extras;
+  writeJson(path.join(slot, 'stamp.json'), parked);
   rememberKeilOrder(repoRoot, oid, pin);
 }
 
@@ -289,14 +332,15 @@ function takeKeilCache(repoRoot, oid, kn) {
   return cached;
 }
 
-// 换提交时把当前编烧树留下。目标提交已有缓存就整棵换上，否则复制一份再在原地增量同步。
-function swapKeilCache(repoRoot, kn, stamp, head) {
+// 换提交时留下清单。旧的整棵缓存仍改名换上。没有清单就只存非 blob 文件，当前树按差异改。返回换上的清单。扩展宿主调用。
+function swapKeilCache(repoRoot, kn, stamp, head, isLibraryPath) {
   const fromOid = commitOid(stamp && stamp.head);
   const toOid = commitOid(head);
   if (!fromOid || !toOid || fromOid === toOid) return null;
   if (!stamp || stamp.complete !== true || stamp.version !== SYNC_VERSION) return null;
   if (!fs.existsSync(path.join(kn, SYNC_READY_FILE))) return null;
-  if (keilCacheReady(repoRoot, toOid)) {
+  const library = isLibraryPath || function () { return false; };
+  if (fullTreeReady(repoRoot, toOid)) {
     parkKeilRename(repoRoot, fromOid, kn, stamp, toOid);
     try {
       const taken = takeKeilCache(repoRoot, toOid, kn);
@@ -306,12 +350,21 @@ function swapKeilCache(repoRoot, kn, stamp, head) {
     if (!fs.existsSync(kn) && fs.existsSync(parked)) fs.renameSync(parked, kn);
     return null;
   }
-  parkKeilCopy(repoRoot, fromOid, kn, stamp, toOid);
-  return null;
+  parkKeilManifest(repoRoot, fromOid, kn, stamp, toOid, library);
+  if (!manifestReady(repoRoot, toOid)) return null;
+  return applyKeilManifest(repoRoot, kn, stamp, toOid, library);
 }
 
-// 树已经是这个提交的。工作区相对 HEAD 没改的文件只刷新时间戳。
-function dropCleanWorktree(repoRoot, stamp, dirty, kn) {
+// 内容已经对上索引时，把时间戳改回 blob。索引里没有这个路径则不动。无返回值。扩展宿主调用。
+function rememberBlob(repoRoot, rel, files, libraryFiles) {
+  const oid = indexBlobOid(repoRoot, rel);
+  if (!oid) return;
+  const blob = 'b:' + oid;
+  if (files && Object.prototype.hasOwnProperty.call(files, rel)) files[rel] = blob;
+  if (libraryFiles && Object.prototype.hasOwnProperty.call(libraryFiles, rel)) libraryFiles[rel] = blob;
+}
+
+function dropCleanWorktree(repoRoot, stamp, dirty, kn, files, libraryFiles) {
   const local = diffNameSet(repoRoot, ['HEAD']);
   if (!local) return;
   const skipped = skipWorktreeSet(repoRoot);
@@ -321,11 +374,12 @@ function dropCleanWorktree(repoRoot, stamp, dirty, kn) {
     if (skipped.has(rel) || local.has(rel)) continue;
     if (!fs.existsSync(path.join(kn, rel))) continue;
     dirty.delete(rel);
+    rememberBlob(repoRoot, rel, files, libraryFiles);
   }
 }
 
-// 检出会改时间戳。提交和工作区内容都没变的文件只更新戳，不重写编烧副本。
-function relaxUnchangedBlobs(repoRoot, stamp, head, dirty, files) {
+// 检出只改了时间戳、内容仍等于提交时，从脏集合拿掉，并把源戳改回 blob。无返回值。扩展宿主调用。
+function relaxUnchangedBlobs(repoRoot, stamp, head, dirty, files, libraryFiles) {
   const from = String(stamp.head || '').trim().toLowerCase();
   const to = String(head || '').trim().toLowerCase();
   if (!/^[0-9a-f]{40}$/.test(from) || !/^[0-9a-f]{40}$/.test(to) || from === to) return;
@@ -335,10 +389,11 @@ function relaxUnchangedBlobs(repoRoot, stamp, head, dirty, files) {
   const skipped = skipWorktreeSet(repoRoot);
   for (const rel of Array.from(dirty)) {
     const previous = (stamp.files && stamp.files[rel]) || (stamp.libraryFiles && stamp.libraryFiles[rel]) || '';
-    const current = (files && files[rel]) || '';
+    const current = (files && files[rel]) || (libraryFiles && libraryFiles[rel]) || '';
     if (!previous || !current) continue;
     if (skipped.has(rel) || changed.has(rel) || local.has(rel)) continue;
     dirty.delete(rel);
+    rememberBlob(repoRoot, rel, files, libraryFiles);
   }
 }
 
@@ -353,8 +408,8 @@ function fileStamp(p) {
   }
 }
 
-// 已入库且和工作区一致时用 blob。工作区改过或还没入库时用文件时间。文件不存在返回空串。扩展宿主调用。
-function sourceStamp(repoRoot, rel, worktreeDirty) {
+// 已入库且和工作区一致时用 blob。工作区改过、问不到工作区、skip-worktree 或还没入库时用文件时间。文件不存在返回空串。扩展宿主调用。
+function sourceStamp(repoRoot, rel, worktreeDirty, forceStat) {
   const abs = path.join(repoRoot, rel);
   let st = null;
   try { st = fs.statSync(abs); } catch (err) {
@@ -363,21 +418,123 @@ function sourceStamp(repoRoot, rel, worktreeDirty) {
   }
   if (!st.isFile()) return '';
   const stat = [st.size, st.mtimeMs, st.ctimeMs, st.ino].join('|');
-  if (worktreeDirty && worktreeDirty.has(rel)) return stat;
+  // worktreeDirty 为 null 表示 git 没问成，不能当成没改过。
+  if (forceStat || !worktreeDirty || worktreeDirty.has(rel)) return stat;
   const oid = indexBlobOid(repoRoot, rel);
   if (oid) return 'b:' + oid;
   return stat;
 }
 
-// 工作区相对索引改过的路径。检出后内容没变则是空集。扩展宿主调用。
-function worktreeDirtySet(repoRoot) {
-  const out = gitText(repoRoot, ['diff-files', '--name-only', '-z'], { allowFail: true });
-  const set = new Set();
-  String(out || '').split('\0').filter(Boolean).forEach((name) => set.add(slashRel(name)));
-  return set;
+function blobStamp(value) {
+  return typeof value === 'string' && value.indexOf('b:') === 0;
 }
 
-function sourceSnapshot(repoRoot, stamp, isLibraryPath, topDirs) {
+function sameStringList(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+// 这条路径要不要进编烧树。库只收源文件。返回是否收录。扩展宿主调用。
+function acceptSyncedRel(rel, stamp, isLibraryPath, tops) {
+  if (isLibraryPath(rel)) return isSourceExt(rel);
+  const top = rel.split('/')[0];
+  const wasCopied = Object.prototype.hasOwnProperty.call(stamp.files || {}, rel);
+  const atRootSource = rel.indexOf('/') < 0 && isSourceExt(rel);
+  if (!(wasCopied || tops.has(top) || atRootSource || rel.startsWith('Project/') || rel.startsWith('H750/Projects/MDK-ARM/'))) return false;
+  return !skipSyncPath(rel);
+}
+
+// 索引里 skip-worktree 的路径，已排序。git 失败返回 null。扩展宿主调用。
+function listSkipped(repoRoot) {
+  const r = git(repoRoot, ['ls-files', '-v', '-z'], { allowFail: true });
+  if (!r || r.status !== 0) return null;
+  const list = [];
+  String(r.stdout || '').split('\0').filter(Boolean).forEach((rec) => {
+    if (rec.charAt(0) !== 'S' && rec.charAt(0) !== 's') return;
+    const name = rec.charAt(1) === ' ' ? rec.slice(2) : rec.slice(1);
+    if (name) list.push(slashRel(name));
+  });
+  list.sort();
+  return list;
+}
+
+// 一次列出工作区改动和未跟踪文件。只看相对索引的工作区列，已暂存但工作区一致的不在这里。git 失败返回 null。扩展宿主调用。
+function listWorktreeChanges(repoRoot) {
+  const started = process.hrtime.bigint();
+  const r = git(repoRoot, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'], { allowFail: true });
+  const ms = Number(process.hrtime.bigint() - started) / 1e6;
+  if (!r || r.status !== 0) return null;
+  const dirty = new Set();
+  const untracked = [];
+  String(r.stdout || '').split('\0').forEach((rec) => {
+    if (rec.length < 4) return;
+    const x = rec.charAt(0);
+    const y = rec.charAt(1);
+    const name = rec.charAt(2) === ' ' ? rec.slice(3) : rec.slice(2);
+    if (!name) return;
+    const rel = slashRel(name);
+    if (x === '?' && y === '?') untracked.push(rel);
+    else if (y !== ' ') dirty.add(rel);
+  });
+  return { dirty: dirty, untracked: untracked, ms: ms };
+}
+
+// 供还没问过工作区的扫描使用。git 失败返回 null。扩展宿主调用。
+function worktreeDirtySet(repoRoot) {
+  const listed = listWorktreeChanges(repoRoot);
+  return listed ? listed.dirty : null;
+}
+
+function noteSource(rel, current, previous, library, files, libraryFiles, dirty) {
+  if (current) (library ? libraryFiles : files)[rel] = current;
+  if (current !== ((previous && previous[rel]) || '')) dirty.add(rel);
+}
+
+// 已跟踪且没被点名的文件沿用 blob 戳。点名的改动、未跟踪、skip-worktree 和项目辅助文件仍读取。返回和全量扫描相同的快照。扩展宿主调用。
+function reuseSourceSnapshot(repoRoot, stamp, isLibraryPath, topDirs, worktreeDirty, index, indexBlobs, untracked, gitListMs) {
+  const started = process.hrtime.bigint();
+  const tops = new Set(topDirs);
+  const skipped = new Set(stamp.skipped || []);
+  const files = {};
+  const libraryFiles = {};
+  const dirty = new Set();
+  const paths = new Set();
+  const named = worktreeDirty || new Set();
+  const keep = (rel, stored) => blobStamp(stored) && !skipped.has(rel) && !named.has(rel);
+  Object.keys(stamp.files || {}).forEach((rel) => {
+    if (!isLibraryPath(rel) && keep(rel, stamp.files[rel])) files[rel] = stamp.files[rel];
+    else paths.add(rel);
+  });
+  Object.keys(stamp.libraryFiles || {}).forEach((rel) => {
+    if (isLibraryPath(rel) && keep(rel, stamp.libraryFiles[rel])) libraryFiles[rel] = stamp.libraryFiles[rel];
+    else paths.add(rel);
+  });
+  named.forEach((rel) => paths.add(rel));
+  (untracked || []).forEach((rel) => paths.add(rel));
+  collectProjectRels(repoRoot).forEach((rel) => {
+    if (!files[rel]) paths.add(rel);
+  });
+  for (const rel of paths) {
+    if (!acceptSyncedRel(rel, stamp, isLibraryPath, tops)) continue;
+    const library = isLibraryPath(rel);
+    const previous = library ? stamp.libraryFiles : stamp.files;
+    const current = sourceStamp(repoRoot, rel, worktreeDirty, skipped.has(rel));
+    noteSource(rel, current, previous, library, files, libraryFiles, dirty);
+  }
+  return {
+    files: files, libraryFiles: libraryFiles, dirty: dirty, worktreeDirty: worktreeDirty,
+    gitListMs: gitListMs || 0,
+    sourceScanMs: Number(process.hrtime.bigint() - started) / 1e6,
+    index: index, indexBlobs: indexBlobs || '', skipped: stamp.skipped.slice(), sourceReuse: true
+  };
+}
+
+function sourceSnapshot(repoRoot, stamp, isLibraryPath, topDirs, opts) {
+  const opt = opts || {};
+  if (opt.reuse) {
+    return reuseSourceSnapshot(repoRoot, stamp, isLibraryPath, topDirs, opt.worktreeDirty, opt.index, opt.indexBlobs, opt.untracked, opt.gitListMs);
+  }
   const started = process.hrtime.bigint();
   // Enumerate names without Git's index/worktree comparison and clean filters.
   // Compare against the last build, since staging alone does not change inputs.
@@ -391,26 +548,23 @@ function sourceSnapshot(repoRoot, stamp, isLibraryPath, topDirs) {
   const files = {};
   const libraryFiles = {};
   const dirty = new Set();
-  const worktreeDirty = worktreeDirtySet(repoRoot);
+  const worktreeDirty = (opt.worktreeDirty instanceof Set || opt.worktreeDirty === null)
+    ? opt.worktreeDirty
+    : worktreeDirtySet(repoRoot);
+  const skippedList = listSkipped(repoRoot);
+  const skipped = new Set(skippedList || []);
   for (const rel of paths) {
+    if (!acceptSyncedRel(rel, stamp, isLibraryPath, tops)) continue;
     const library = isLibraryPath(rel);
-    if (library) {
-      if (!isSourceExt(rel)) continue;
-    } else {
-      const top = rel.split('/')[0];
-      const wasCopied = Object.prototype.hasOwnProperty.call(stamp.files || {}, rel);
-      const atRootSource = rel.indexOf('/') < 0 && isSourceExt(rel);
-      if (!(wasCopied || tops.has(top) || atRootSource || rel.startsWith('Project/') || rel.startsWith('H750/Projects/MDK-ARM/'))) continue;
-      if (skipSyncPath(rel)) continue;
-    }
     const previous = library ? stamp.libraryFiles : stamp.files;
-    const current = sourceStamp(repoRoot, rel, worktreeDirty);
-    if (current) (library ? libraryFiles : files)[rel] = current;
-    if (current !== ((previous && previous[rel]) || '')) dirty.add(rel);
+    const current = sourceStamp(repoRoot, rel, worktreeDirty, skipped.has(rel));
+    noteSource(rel, current, previous, library, files, libraryFiles, dirty);
   }
   return {
-    files, libraryFiles, dirty, worktreeDirty, gitListMs,
-    sourceScanMs: Number(process.hrtime.bigint() - started) / 1e6 - gitListMs
+    files: files, libraryFiles: libraryFiles, dirty: dirty, worktreeDirty: worktreeDirty, gitListMs: gitListMs,
+    sourceScanMs: Number(process.hrtime.bigint() - started) / 1e6 - gitListMs,
+    index: opt.index || indexIdentity(repoRoot), indexBlobs: indexBlobFingerprint(repoRoot) || '',
+    skipped: skippedList, sourceReuse: false
   };
 }
 
@@ -479,13 +633,19 @@ function refreshRestoredTargets(kn, nextStamp) {
   });
 }
 
-function syncOne(repoRoot, kn, table, stamp, nextStamp, rel, full, dirty, isLibraryPath, worktreeDirty) {
+function syncOne(repoRoot, kn, table, stamp, nextStamp, rel, full, dirty, isLibraryPath, worktreeDirty, skipped) {
   if (skipSyncPath(rel)) return 'skipped';
   // 库由 junction 统一挂载：绝不逐文件拷贝/删除（否则会写进 junction 目标即真实仓库，或把 junction 内容删空）。
-  if (isLibraryPath(rel)) return 'skipped';
+  // 原先抄进 files 的路径改成库之后，从文件戳里拿掉，下次不再当库时才会重新写出并拆掉 junction。
+  if (isLibraryPath(rel)) {
+    delete nextStamp.files[rel];
+    delete nextStamp.targets[rel];
+    if (nextStamp.kinds) delete nextStamp.kinds[rel];
+    return 'skipped';
+  }
   const src = path.join(repoRoot, rel);
   const dst = path.join(kn, rel);
-  const st = sourceStamp(repoRoot, rel, worktreeDirty);
+  const st = sourceStamp(repoRoot, rel, worktreeDirty, skipped && skipped.has(rel));
   if (!st) {
     delete nextStamp.files[rel];
     delete nextStamp.targets[rel];
@@ -547,7 +707,7 @@ function syncKeilTree(repoRoot, emit) {
   const log = (m) => { if (emit) emit(m); };
   const kn = keilNativeRoot(repoRoot);
   fs.mkdirSync(kn, { recursive: true });
-  // 等编码表刷新结束再读。读到旧表时，每个缺表文件都会再去问一次原来的 blob。
+  // 换分支时同步命令先写好编码表。这里只读一次，不再空等。
   const tableLock = acquireLock(repoRoot, 'encoding-table');
   let table;
   try {
@@ -564,7 +724,7 @@ function syncKeilTree(repoRoot, emit) {
   const branch = currentBranch(repoRoot);
   let restored = false;
   try {
-    const swapped = swapKeilCache(repoRoot, kn, stamp, head);
+    const swapped = swapKeilCache(repoRoot, kn, stamp, head, isLibraryPath);
     if (swapped) {
       stamp = swapped;
       writeJson(keilStampPath(repoRoot), stamp);
@@ -573,34 +733,63 @@ function syncKeilTree(repoRoot, emit) {
   } catch (_) { /* 留不下缓存就按当前这棵树继续 */ }
   if (!fs.existsSync(kn)) fs.mkdirSync(kn, { recursive: true });
   const topDirs = listTopDirs(repoRoot, libraryTops);
-  const snapshot = sourceSnapshot(repoRoot, stamp, isLibraryPath, topDirs);
-  const dirty = snapshot.dirty;
-  const worktreeDirty = snapshot.worktreeDirty;
   // 换分支只让 mtime 变了的文件变脏。整棵重写留给戳版本、缺清单这种结构破坏。
   const full = stamp.version !== SYNC_VERSION || stamp.complete !== true
     || !fs.existsSync(readyFile) || !stamp.files || !stamp.targets;
-  if (!full) relaxUnchangedBlobs(repoRoot, stamp, head, dirty, Object.assign({}, snapshot.libraryFiles, snapshot.files));
-  if (!full && restored && commitOid(stamp.head) === commitOid(head)) dropCleanWorktree(repoRoot, stamp, dirty, kn);
-  // 检出后的编码表可能还在写。目录比对期间等它落盘，再拿这份表，避免每个缺表文件单独去读 blob。
-  table = loadSettledTable(repoRoot, head);
+  // 先问工作区，再记索引戳。blob 没变时，点名的改动单独重写，其余已跟踪文件沿用戳。
+  const listed = listWorktreeChanges(repoRoot);
+  const knownDirty = listed ? listed.dirty : null;
+  const indexNow = indexIdentity(repoRoot);
+  const trackedSame = !full && !!knownDirty && Array.isArray(stamp.skipped)
+    && commitOid(stamp.head) === commitOid(head);
+  let reuse = trackedSame && !!stamp.index && stamp.index === indexNow;
+  let indexBlobs = '';
+  if (trackedSame && stamp.indexBlobs && !reuse) {
+    indexBlobs = indexBlobFingerprint(repoRoot);
+    reuse = !!indexBlobs && indexBlobs === stamp.indexBlobs;
+  } else if (reuse && !stamp.indexBlobs) {
+    indexBlobs = indexBlobFingerprint(repoRoot);
+  } else if (reuse) {
+    indexBlobs = stamp.indexBlobs;
+  }
+  const snapshot = sourceSnapshot(repoRoot, stamp, isLibraryPath, topDirs, {
+    reuse: reuse, worktreeDirty: knownDirty, untracked: listed && listed.untracked,
+    gitListMs: listed && listed.ms, index: indexNow, indexBlobs: indexBlobs
+  });
+  const dirty = snapshot.dirty;
+  const worktreeDirty = snapshot.worktreeDirty;
+  const skippedSet = new Set(snapshot.skipped || []);
+  if (!full) relaxUnchangedBlobs(repoRoot, stamp, head, dirty, snapshot.files, snapshot.libraryFiles);
+  // 清单换上时，非 blob 的副本可能和工作区不一致，不能因为工作区干净就跳过重写。
+  if (!full && restored && !stamp.manifest && commitOid(stamp.head) === commitOid(head)) {
+    dropCleanWorktree(repoRoot, stamp, dirty, kn, snapshot.files, snapshot.libraryFiles);
+  }
+  // git diff 会刷新同秒写入的索引。戳记刷新之后的，下次同提交才能沿用。
+  const indexSettled = indexIdentity(repoRoot);
+  if (indexSettled) snapshot.index = indexSettled;
   if (!full && stamp.kinds) {
     for (const rel of Object.keys(stamp.files)) {
       if ((stamp.kinds[rel] || '') !== (table[rel] || '')) dirty.add(rel);
     }
   }
   const targetCheckStart = process.hrtime.bigint();
-  // Check targets as well as sources: build tools can overwrite copied inputs.
+  // 编烧副本被外部盖过就要重写。换树命中时这一遍记下新时间，不再扫第二遍。
+  const refreshedTargets = {};
   if (!full) {
     for (const rel of Object.keys(stamp.files || {})) {
       if (isLibraryPath(rel)) continue;
       const current = fileStamp(path.join(kn, rel));
       if (!current) dirty.add(rel);
-      else if (current !== stamp.targets[rel] && !restored) dirty.add(rel);
+      else if (current !== stamp.targets[rel]) {
+        if (restored) refreshedTargets[rel] = current;
+        else dirty.add(rel);
+      }
     }
   }
   const timings = {
     gitListMs: snapshot.gitListMs, sourceScanMs: snapshot.sourceScanMs,
-    targetCheckMs: Number(process.hrtime.bigint() - targetCheckStart) / 1e6
+    targetCheckMs: Number(process.hrtime.bigint() - targetCheckStart) / 1e6,
+    sourceReuse: !!snapshot.sourceReuse
   };
   // 换上来的树里，库和时间戳目录不会重写。留在 dirty 里会挡住整棵命中。
   if (restored) {
@@ -641,13 +830,21 @@ function syncKeilTree(repoRoot, emit) {
       stamp.files[rel] = snapshot.files[rel];
       stampMoved = true;
     });
-    if (restored && stamp.targets) {
-      Object.keys(stamp.targets).forEach((rel) => {
-        const cur = fileStamp(path.join(kn, rel));
-        if (!cur || cur === stamp.targets[rel]) return;
-        stamp.targets[rel] = cur;
-        stampMoved = true;
-      });
+    Object.keys(refreshedTargets).forEach((rel) => {
+      stamp.targets[rel] = refreshedTargets[rel];
+      stampMoved = true;
+    });
+    if (snapshot.index && stamp.index !== snapshot.index) {
+      stamp.index = snapshot.index;
+      stampMoved = true;
+    }
+    if (snapshot.indexBlobs && stamp.indexBlobs !== snapshot.indexBlobs) {
+      stamp.indexBlobs = snapshot.indexBlobs;
+      stampMoved = true;
+    }
+    if (Array.isArray(snapshot.skipped) && !sameStringList(stamp.skipped, snapshot.skipped)) {
+      stamp.skipped = snapshot.skipped;
+      stampMoved = true;
     }
     if (stampMoved) writeJson(keilStampPath(repoRoot), stamp);
     const skippedAll = Object.keys(stamp.files || {}).length;
@@ -673,6 +870,7 @@ function syncKeilTree(repoRoot, emit) {
       root: kn,
       libWarnings: loadLibWarnings(repoRoot),
       cacheHit: true,
+      sourceReuse: !!snapshot.sourceReuse,
       timings
     };
   }
@@ -680,8 +878,9 @@ function syncKeilTree(repoRoot, emit) {
   try { fs.unlinkSync(readyFile); } catch (e) { if (e.code !== 'ENOENT') throw e; }
   const nextStamp = {
     version: SYNC_VERSION, head: head, branch: branch, files: {}, targets: {}, kinds: {},
-    libraryFiles: snapshot.libraryFiles
+    libraryFiles: snapshot.libraryFiles, index: snapshot.index || '', indexBlobs: snapshot.indexBlobs || ''
   };
+  if (Array.isArray(snapshot.skipped)) nextStamp.skipped = snapshot.skipped;
   const incremental = !full && dirty.size > 0;
   if (incremental && stamp.files) {
     Object.keys(stamp.files).forEach((rel) => { nextStamp.files[rel] = stamp.files[rel]; });
@@ -706,19 +905,19 @@ function syncKeilTree(repoRoot, emit) {
     if (incremental) {
       // Reuse entries whose current metadata matches the previous build.
       for (const rel of dirty) {
-        tally(syncOne(repoRoot, kn, table, stamp, nextStamp, rel, false, dirty, isLibraryPath, worktreeDirty));
+        tally(syncOne(repoRoot, kn, table, stamp, nextStamp, rel, false, dirty, isLibraryPath, worktreeDirty, skippedSet));
       }
     } else if (clean && stamp.files) {
       const rels = new Set(Object.keys(stamp.files));
       collectProjectRels(repoRoot).forEach((rel) => rels.add(rel));
       for (const rel of rels) {
-        tally(syncOne(repoRoot, kn, table, stamp, nextStamp, rel, false, dirty, isLibraryPath, worktreeDirty));
+        tally(syncOne(repoRoot, kn, table, stamp, nextStamp, rel, false, dirty, isLibraryPath, worktreeDirty, skippedSet));
       }
     } else {
       const rels = new Set(Object.keys(snapshot.files));
       collectProjectRels(repoRoot).forEach((rel) => rels.add(rel));
       for (const rel of rels) {
-        tally(syncOne(repoRoot, kn, table, stamp, nextStamp, rel, full, dirty, isLibraryPath, worktreeDirty));
+        tally(syncOne(repoRoot, kn, table, stamp, nextStamp, rel, full, dirty, isLibraryPath, worktreeDirty, skippedSet));
       }
     }
   } finally {
@@ -796,6 +995,7 @@ function syncKeilTree(repoRoot, emit) {
     junctioned: junctioned,
     root: kn,
     libWarnings: libWarnings,
+    sourceReuse: !!snapshot.sourceReuse,
     timings
   };
 }

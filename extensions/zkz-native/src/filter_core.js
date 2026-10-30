@@ -61,6 +61,7 @@ function trackedMapping(repoRoot, pathname) {
   return encodeMapped(detectKind(rec.data), hasCrlf(rec.data));
 }
 
+// 表里已有种类仍要核对 blob。种类不一致时以字节为准，避免把 UTF-8 当 GBK 解。返回工作区字节。过滤进程调用。
 function smudge(pathname, blobBytes, table, repoRoot, isLibraryPath) {
   if (repoRoot && (isLibraryPath ? isLibraryPath(pathname) : isLibRel(repoRoot, pathname))) return Buffer.from(blobBytes || []);
   const mapped = lookupKind(table, pathname);

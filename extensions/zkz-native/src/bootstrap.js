@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const { isWorktreeClean, currentHead, readHeadName } = require('./git_exec');
-const { buildTable, loadTable, loadMeta, countByKind, noteTableRef } = require('./enc_table');
+const { buildTable, loadTable, loadMeta, countByKind, noteTableRef, noteTableHead } = require('./enc_table');
 const { installGitConfig, uninstallGitConfig, isInstalled } = require('./git_config');
 const { installHooks, uninstallHooks } = require('./hooks');
 const { atomicWriteJson, nativeStatusPath, ensureZkz, formatLocalNow } = require('./paths');
@@ -177,6 +177,22 @@ function disable(repoRoot) {
   return { installed: false, restored: r.checked, leftover: r.leftover };
 }
 
+// 编烧同步前让编码表对上当前提交。同分支只改提交号，换分支才重算。重算过返回 true。扩展宿主调用。
+async function settleEncodingTable(repoRoot) {
+  const meta = loadMeta(repoRoot);
+  const head = currentHead(repoRoot);
+  const got = String(meta && meta.head || '').trim().toLowerCase();
+  const want = String(head || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(got) || !/^[0-9a-f]{40}$/.test(want) || got === want) return false;
+  const ref = readHeadName(repoRoot);
+  if (meta.ref && ref && meta.ref === ref && ref.indexOf('refs/heads/') === 0) {
+    noteTableHead(repoRoot, want);
+    return false;
+  }
+  await silentRefresh(repoRoot, { from: meta.head, to: head });
+  return true;
+}
+
 async function silentRefresh(repoRoot, opts) {
   const errors = [];
   try {
@@ -226,6 +242,7 @@ module.exports = {
   disable,
   refresh,
   silentRefresh,
+  settleEncodingTable,
   statusSnapshot,
   barLabel,
   statusLines,

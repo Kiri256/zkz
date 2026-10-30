@@ -4,7 +4,7 @@ const vscode = require('vscode');
 const loadShared = require('./load_shared');
 const { findProjectRoot } = loadShared('project_root');
 const { isInstalled } = require('./git_config');
-const { enable, disable, refresh, statusSnapshot, statusLines } = require('./bootstrap');
+const { enable, disable, refresh, settleEncodingTable, statusSnapshot, statusLines } = require('./bootstrap');
 const { git } = require('./git_exec');
 const { syncKeilTree } = require('./keil_tree');
 const { installLocalConfig, uninstallLocalConfig, isLocalInstalled } = require('./git_config');
@@ -120,7 +120,8 @@ async function cmdRefresh(extensionRoot, onStatus) {
 
 function cmdSyncKeilTree() {
   const repo = requireInstalled();
-  return withLock(repo, () => {
+  return withLock(repo, async () => {
+    await settleEncodingTable(repo);
     const r = syncKeilTree(repo, emit);
     const n = (r && r.libWarnings && r.libWarnings.length) || 0;
     if (n) emit(n + ' 个库文件编码疑似漂移或损坏。库不过滤，不会自动改回。');

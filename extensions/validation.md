@@ -75,7 +75,7 @@ native 覆盖编码识别、clean/smudge、真实 Git 过滤集成、编码表�
 | 同步中断 | 完成标记失效，重试不得命中旧完成状态 |
 | 编码表、库配置或算法版本变化 | 全量重建；新增配置库目录后下次同步能创建链接，移除库分类后业务文件恢复为副本 |
 | 项目辅助文件 | `Project` 及 H750 MDK 的 `Obj/Flash` 下 `.sct/.ini/.scf` 能新增、修改和删除，`.o` 等产物不复制 |
-| 源文件元数据快照 | 同大小并保留 mtime 的修改仍通过 ctime 等识别；已同步的 staged 文件不重复写入，撤销、未跟踪新目录及重命名结果正确；Git 枚举或源文件权限失败时中止 |
+| 源文件元数据快照 | 同大小并保留 mtime 的修改仍通过 ctime 等识别；已同步的 staged 文件不重复写入，撤销、未跟踪新目录及重命名结果正确。索引里的 blob 没变时，没被点名的已跟踪源文件不再 stat；只改工作区的文件仍重写，其余沿用。索引只刷新时间也沿用。已暂存且 blob 变了则整批取戳。未跟踪文件、skip-worktree 和项目辅助文件仍检查。Git 枚举失败，或这些仍要读取的源文件权限失败时中止 |
 | 库文件元数据快照 | 库编码漂移后告警在缓存命中或其他业务文件更新时保留；库修复后消除告警 |
 | 协议流错误和输出背压 | 保留输入原始错误；低 highWaterMark 下输出字节正确，写入失败或提前关闭时拒绝请求 |
 | 输入积压与恢复 | 消费者空闲时队列达到约 256 KiB 后暂停上游，消费到约 64 KiB 时恢复；大于阈值的负载仍完整输出 |
@@ -100,4 +100,4 @@ Get-Content .zkz/run/performance.jsonl -Tail 20
 
 干净 `git status` 通常不执行过滤，不能单独用它证明过滤速度提高。在独立仓库中用相同的一组源文件执行实际触发 clean 的 `git add`，以及触发 smudge 的文件恢复/检出，分别计时，并在每轮开始前重置相同测试状态。已有文件、新文件、GBK/UTF-8、CRLF 和库路径都要覆盖。
 
-性能日志目前覆盖编码表构建、编烧树同步、compile_commands 生成，以及本地配置替身。替身阶段名是 `zkz-native.localConfig`，`step` 为 `prepare` 或 `restore`，并带 `command`、`moved`、`copied`、`ms`。不记录每次 clean/smudge。编烧树观察 `cacheHit`、`written`、`skipped`、`dirty` 与 `ms`，并用 `gitListMs`、`sourceScanMs`、`targetCheckMs` 定位文件枚举、源元数据及项目扫描、目标存在检查开销；`dirty` 现在是相对上次同步元数据变化的路径数，不是 Git status 的修改数。编译数据库日志只有耗时、条目数、机型和 target。源文件 stat、目录检查和 Git 枚举仍有 I/O。
+性能日志目前覆盖编码表构建、编烧树同步、compile_commands 生成，以及本地配置替身。替身阶段名是 `zkz-native.localConfig`，`step` 为 `prepare` 或 `restore`，并带 `command`、`moved`、`copied`、`ms`。不记录每次 clean/smudge。编烧树观察 `cacheHit`、`written`、`skipped`、`dirty`、`sourceReuse` 与 `ms`，并用 `gitListMs`、`sourceScanMs`、`targetCheckMs` 定位文件枚举、源元数据及项目扫描、目标存在检查开销。`sourceReuse` 为真表示已跟踪源文件沿用了 blob 戳。`dirty` 现在是相对上次同步元数据变化的路径数，不是 Git status 的修改数。编译数据库日志只有耗时、条目数、机型和 target。目标文件 stat、未跟踪文件和 Git 枚举仍有 I/O。
