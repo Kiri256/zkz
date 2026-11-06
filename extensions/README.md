@@ -16,12 +16,12 @@
 
 工程根目录、Keil 布局、工程根解析、过滤器是否启用、设置读写都在 `extensions/shared/`。扩展源码用 `loadShared('模块名')` 加载，源码树和装进扩展后走同一条向上查找。打包按 `loadShared` 的名字把共享文件拷进 vsix 的 `src/shared/`，不再改写 require。`src/` 里直接 `require` shared 路径时打包失败。
 
-设置写在仓库 `.zkz/settings.json`（`native` / `keil` / `code`）。默认值在 `extensions/shared/zkz_settings.js`。工作区没有设置文件时按这些默认值生成，已有的键不覆盖。空字符串按未设置处理。这份文件不进 git。
+设置写在仓库 `.zkz/settings.json`（`native` / `keil` / `code` / `lists`）。默认值在 `extensions/shared/zkz_settings.js`。工作区没有设置文件时按这些默认值生成，已有的键不覆盖。空字符串按未设置处理。这份文件不进 git。
 
 - `zkz-keil` 编烧前：过滤器已启用则调用 `zkz-native.syncKeilTree`，命令不在就失败；未启用则编真源
 - `zkz-keil` 调试：按布局把 `output.axf` 拷到 `.zkz/output.axf`；gdb map 在过滤器启用时用 `substitute-path` 把编烧树指回真源
 - `zkz-code` 自己监视 `HEAD`，刷新宏和 `compile_commands`
-- 换分支后 `zkz-code` 自己刷宏徽章和 `compile_commands`
+- 换分支后 `zkz-code` 自己刷宏徽章和 `compile_commands`。`keil.flavor` 或当前机型的 target 变了也重写 `compile_commands`
 
 切分支只刷编码表，不在 hook 里同步编烧树。
 

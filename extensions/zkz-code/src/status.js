@@ -7,7 +7,7 @@ const { showInfoAuto, withProgress, log } = require('./util');
 const loadShared = require('./load_shared');
 const { resolvePair } = loadShared('pair');
 const { refreshCompileCommands: refreshCompileCommandsFile, resolveKeilLayout } = require('./compile_commands');
-const { readHeadName, isCompileCommandsBranchStale } = require('./cc_stamp');
+const { readHeadName, isCompileCommandsBranchStale, isCompileCommandsLayoutStale } = require('./cc_stamp');
 const { startHeadWatch } = require('./head_watch');
 const {
   findYtVersion,
@@ -21,7 +21,7 @@ const {
   listedMacroNames,
   formatMacroBadge
 } = require('./macros');
-const { diffMacroValues, clearClangdIndex, restartClangdSoft } = require('./macro_impact');
+const { diffMacroValues, clearClangdIndex, restartClangdSoft, clangdIndexDir } = require('./macro_impact');
 const ifdefFold = require('./ifdef_fold');
 const statusBar = require('./status_bar');
 
@@ -31,6 +31,8 @@ const PREFIX = 'zkz-code';
 let gLastMacros = {};
 /** 连续保存合并成一次 clangd 重启。 */
 let gClangdRestartTimer = null;
+let gIndexPromptOpen = false;
+let gPendingWipe = null;
 const CLANGD_RESTART_DEBOUNCE_MS = 1000;
 let gRefreshTimer = null;
 let gRefreshInFlight = false;
@@ -45,6 +47,11 @@ let gCcPromptedBranch = '';
 let gCcRefreshInFlight = false;
 let gCcRefreshQueued = false;
 let gCcRefreshQueuedBranch = false;
+let gCcRefreshQueuedLayout = false;
+let gFlavorWatch = null;
+let gFlavorRoot = '';
+let gLayoutKey = '';
+let gFlavorDebounce = null;
 
 function command(name) {
   return PREFIX + '.' + name;
@@ -97,7 +104,7 @@ function refreshCcBadge() {
     bar.setCc(false, false);
     return;
   }
-  bar.setCc(true, isCompileCommandsBranchStale(root));
+  bar.setCc(true, isCompileCommandsBranchStale(root) || isCompileCommandsLayoutStale(root));
 }
 
 function maybePromptCcFail(branch, err) {
@@ -116,13 +123,15 @@ async function autoRefreshCc(root, branch, opts) {
   if (!shouldTrackCc(root)) return;
   const missing = !fs.existsSync(path.join(root, 'compile_commands.json'));
   const onBranch = !!(opts && opts.branch);
-  if (!missing && !onBranch) {
+  const onLayout = !!(opts && opts.layout);
+  if (!missing && !onBranch && !onLayout) {
     refreshCcBadge();
     return;
   }
   if (gCcRefreshInFlight) {
     gCcRefreshQueued = true;
     if (onBranch) gCcRefreshQueuedBranch = true;
+    if (onLayout) gCcRefreshQueuedLayout = true;
     return;
   }
   gCcRefreshInFlight = true;
@@ -130,9 +139,12 @@ async function autoRefreshCc(root, branch, opts) {
   try {
     const run = () => refreshCompileCommandsFile(root, { force: true, log });
     if (opts && opts.notify) {
+      const title = onBranch
+        ? 'zkz-code：检测到分支切换，正在刷新 compile_commands'
+        : 'zkz-code：机型已切换，正在刷新 compile_commands';
       await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
-        title: 'zkz-code：检测到分支切换，正在刷新 compile_commands',
+        title: title,
         cancellable: false
       }, run);
     } else {
@@ -147,10 +159,14 @@ async function autoRefreshCc(root, branch, opts) {
     refreshCcBadge();
     if (gCcRefreshQueued) {
       const branch = gCcRefreshQueuedBranch;
+      const layout = gCcRefreshQueuedLayout;
       gCcRefreshQueued = false;
       gCcRefreshQueuedBranch = false;
+      gCcRefreshQueuedLayout = false;
       const nextRoot = projectRoot() || root;
-      const nextOpts = branch ? { notify: true, branch: true } : opts;
+      const nextOpts = (branch || layout)
+        ? { notify: true, branch: branch, layout: layout }
+        : opts;
       void autoRefreshCc(nextRoot, readHeadName(nextRoot), nextOpts);
     }
   }
@@ -231,9 +247,9 @@ async function syncYtMacros(opts) {
   }
 
   const changedAll = Object.keys(gLastMacros).length ? diffMacroValues(gLastMacros, macros) : [];
-  // 重启只看白名单；折叠用全量，非白名单变了也要重折
+  // 折叠用全量。索引只在 yt_version.h 的宏变了之后询问，同意才整份清空。
   const changed = changedAll.filter((k) => isTrackedMacro(k));
-  if (gHeadSync && reason !== 'checkout' && reason !== 'save') {
+  if (gHeadSync && reason !== 'checkout' && reason !== 'save' && reason !== 'disk') {
     return { changed: changed, updated: false };
   }
   adoptSeenMacros(macros);
@@ -242,18 +258,53 @@ async function syncYtMacros(opts) {
     try { ifdefFold.onMacrosChanged(); } catch (_) { /* ignore */ }
   }
 
-  if (prompt && changed.length) scheduleClangdRestart();
+  if (prompt && changedAll.length) scheduleIndexWipePrompt(changedAll, reason);
   return { changed: changed, updated: true };
 }
 
-function scheduleClangdRestart() {
+// yt_version.h 的宏变了之后，用右下角提示询问是否清空索引。连续保存合并成一次。扩展宿主调用。
+function scheduleIndexWipePrompt(changed, reason) {
+  gPendingWipe = { changed: (changed || []).slice(), reason: reason || '' };
   if (gClangdRestartTimer) clearTimeout(gClangdRestartTimer);
   gClangdRestartTimer = setTimeout(() => {
     gClangdRestartTimer = null;
-    void restartClangdSoft().then((ok) => {
-      if (!ok) log('clangd restart failed');
-    });
+    void askIndexWipe();
   }, CLANGD_RESTART_DEBOUNCE_MS);
+}
+
+async function askIndexWipe() {
+  if (gIndexPromptOpen) return;
+  const pending = gPendingWipe;
+  gPendingWipe = null;
+  const root = projectRoot();
+  if (!root || !clangdIndexHasShards(root)) return;
+  const names = pending && pending.changed ? pending.changed : [];
+  const preview = names.slice(0, 8).join(', ') + (names.length > 8 ? '...' : '');
+  let reasonHint = '宏';
+  if (pending && pending.reason === 'checkout') reasonHint = '分支切换后';
+  else if (pending && pending.reason === 'disk') reasonHint = '磁盘文件变更后';
+  gIndexPromptOpen = true;
+  try {
+    const choice = await vscode.window.showInformationMessage(
+      reasonHint + '已变化 ' + names.length + ' 项' + (preview ? ': ' + preview : '') + '。可清空 clangd 索引，按当前宏重新后台编译。',
+      '清空索引',
+      '稍后'
+    );
+    if (choice !== '清空索引') return;
+    const r = await clearClangdIndex(root);
+    void showInfoAuto(formatClearResult(r));
+  } finally {
+    gIndexPromptOpen = false;
+  }
+}
+
+function clangdIndexHasShards(root) {
+  try {
+    const names = fs.readdirSync(clangdIndexDir(root));
+    return names.length > 0;
+  } catch (_) {
+    return false;
+  }
 }
 
 async function restartClangd() {
@@ -400,13 +451,13 @@ function activate(context) {
     ytDiskDebounce = setTimeout(() => {
       ytDiskDebounce = null;
       if (isYtVersionWatchSuppressed(uri.fsPath)) return;
-      void syncYtMacros({ reason: 'disk', prompt: false, filePath: uri.fsPath }).then(() => refreshStatus());
+      void syncYtMacros({ reason: 'disk', prompt: true, filePath: uri.fsPath }).then(() => refreshStatus());
     }, 400);
   };
   const onYtDiskDeleted = (uri) => {
     if (!uri || uri.scheme !== 'file' || !isYtVersionPath(projectRoot(uri.fsPath), uri.fsPath)) return;
     invalidateMacroTable();
-    void syncYtMacros({ reason: 'disk', prompt: false }).then(() => refreshStatus());
+    void syncYtMacros({ reason: 'disk', prompt: true }).then(() => refreshStatus());
   };
 
   // .clangd -D 也是宏表输入；折叠不再自己解析，这里统一失效再刷
@@ -434,16 +485,61 @@ function activate(context) {
     if (next === headRepo && headSub) return;
     stopHead();
     headRepo = next || '';
-    if (!headRepo) return;
-    if (isCompileCommandsBranchStale(headRepo)) {
+    if (!headRepo) {
+      bindFlavorWatch('');
+      return;
+    }
+    const branchStale = isCompileCommandsBranchStale(headRepo);
+    const layoutStale = isCompileCommandsLayoutStale(headRepo);
+    if (branchStale || layoutStale) {
       const hasFile = fs.existsSync(path.join(headRepo, 'compile_commands.json'));
       void autoRefreshCc(
         headRepo,
         readHeadName(headRepo),
-        hasFile ? { branch: true, notify: true } : undefined
+        hasFile ? { branch: branchStale, layout: layoutStale, notify: true } : undefined
       );
     }
+    bindFlavorWatch(headRepo);
     headSub = startHeadWatch(null, headRepo, (payload) => onHeadChanged(payload));
+  };
+
+  const layoutKey = (root) => {
+    try {
+      const layout = resolveKeilLayout(root);
+      if (!layout) return '';
+      return (layout.flavor || '') + '\0' + (layout.defaultTarget || '');
+    } catch (_) {
+      return '';
+    }
+  };
+  const bindFlavorWatch = (root) => {
+    if (root === gFlavorRoot && gFlavorWatch) return;
+    if (gFlavorWatch) {
+      try { gFlavorWatch.dispose(); } catch (_) { /* ignore */ }
+      gFlavorWatch = null;
+    }
+    gFlavorRoot = root || '';
+    gLayoutKey = root ? layoutKey(root) : '';
+    if (!root) return;
+    const watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(path.join(root, '.zkz'), 'settings.json')
+    );
+    const onChange = () => {
+      if (gFlavorDebounce) clearTimeout(gFlavorDebounce);
+      gFlavorDebounce = setTimeout(() => {
+        gFlavorDebounce = null;
+        const current = projectRoot() || root;
+        const key = layoutKey(current);
+        if (!key || key === gLayoutKey) return;
+        gLayoutKey = key;
+        void autoRefreshCc(current, readHeadName(current), { layout: true, notify: true });
+      }, 400);
+    };
+    gFlavorWatch = vscode.Disposable.from(
+      watcher,
+      watcher.onDidChange(onChange),
+      watcher.onDidCreate(onChange)
+    );
   };
 
   context.subscriptions.push(
@@ -479,6 +575,11 @@ function activate(context) {
       dispose: () => {
         if (ytDiskDebounce) clearTimeout(ytDiskDebounce);
         if (clangdDebounce) clearTimeout(clangdDebounce);
+        if (gFlavorDebounce) clearTimeout(gFlavorDebounce);
+        if (gFlavorWatch) {
+          try { gFlavorWatch.dispose(); } catch (_) { /* ignore */ }
+          gFlavorWatch = null;
+        }
         if (gRefreshTimer) clearTimeout(gRefreshTimer);
         gHeadSync = false;
         stopHead();

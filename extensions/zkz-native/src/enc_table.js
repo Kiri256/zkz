@@ -205,11 +205,11 @@ function commitOid(value) {
 }
 
 function blobCachePath(repoRoot) {
-  return path.join(path.dirname(tablePath(repoRoot)), 'encoding-by-blob.json');
+  return path.join(path.dirname(tablePath(repoRoot)), 'encoding-blob.json');
 }
 
 function overridePath(repoRoot) {
-  return path.join(path.dirname(tablePath(repoRoot)), 'encoding-path-override.json');
+  return path.join(path.dirname(tablePath(repoRoot)), 'encoding-pin.json');
 }
 
 function readBlobFile(repoRoot) {

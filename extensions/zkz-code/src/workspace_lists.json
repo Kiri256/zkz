@@ -45,7 +45,7 @@
     ".editorconfig",
     "AGENTS.md",
     "CLAUDE.md",
-    ".workspace_source_encodings.json",
+    "encoding-table.json",
     "output.hex"
   ],
   "textExtensions": [

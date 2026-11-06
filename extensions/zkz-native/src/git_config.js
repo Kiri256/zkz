@@ -101,10 +101,8 @@ function attributesBody(repoRoot) {
 function excludeBody() {
   return [
     '.zkz/keil-native/',
-    '.zkz/config_paths.json',
     '.zkz/settings.json',
-    '.zkz/local/',
-    '.zkz/run/'
+    '.zkz/local/'
   ].join('\n');
 }
 

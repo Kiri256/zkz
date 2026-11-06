@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { runDir, relocateRunFiles, sleepSync } = require('./paths');
+const { runDir, sleepSync } = require('./paths');
 
 const chains = Object.create(null);
 const LOCK_TTL_MS = 60 * 1000;
@@ -14,7 +14,6 @@ function lockDirFor(key, scope) {
   const root = path.resolve(String(key || 'default'));
   const identity = scope ? root + '\0' + scope : root;
   const h = crypto.createHash('sha1').update(identity).digest('hex').slice(0, 16);
-  relocateRunFiles(root);
   return path.join(runDir(root), 'locks', h + '.lock');
 }
 

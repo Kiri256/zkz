@@ -23,7 +23,7 @@ UV4 / J-Link / FLM / GDB / SVD / 设备名 / 速度 / QSPI 窗口的默认值在
 | --- | --- |
 | `zkz-keil.keilBuild` | 增量编译，跑任务 Keil Build |
 | `zkz-keil.keilRebuild` | 重新编译 |
-| `zkz-keil.keilFlash` | 烧录。状态栏直接开始，不确认机型 |
+| `zkz-keil.keilFlash` | 烧录。状态栏直接开始，不确认机型。调试还开着时在右下角问是否断开 |
 | `zkz-keil.prepareCortexDebug` | 准备 axf / gdb map，跑任务 Prepare Cortex Debug |
 | `zkz-keil.configureLaunch` | 配置调试，写入 `.vscode/launch.json` |
 

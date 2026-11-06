@@ -7,6 +7,14 @@ const { encodePacket, encodeFlush, encodeContent, MAX_PAYLOAD } = require('../sr
 const { replaceMarkedBlock, stripMarkedBlock, BEGIN, END, isNodeExecutable, nodeBin } = require('../src/git_config');
 
 let failed = 0;
+
+function sourcePorcelain(stdout) {
+  return String(stdout || '').split(/\r?\n/).filter((line) => {
+    const t = line.trim();
+    return t && !/^\?\? \.zkz(\/|$)/.test(t);
+  }).join('\n');
+}
+
 function test(name, fn) {
   try {
     fn();
@@ -31,10 +39,10 @@ test('library matcher snapshot avoids file I/O and refreshes per operation', () 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-lib-cache-'));
   try {
     fs.mkdirSync(path.join(root, '.zkz'));
-    const file = path.join(root, '.zkz', 'workspace_lists.json');
-    fs.writeFileSync(file, JSON.stringify({ libraryDirNames: ['Old'] }));
+    const file = path.join(root, '.zkz', 'settings.json');
+    fs.writeFileSync(file, JSON.stringify({ lists: { libraryDirNames: ['Old'] } }));
     const first = createLibMatcher(root);
-    fs.writeFileSync(file, JSON.stringify({ libraryDirNames: ['NewLibrary'] }));
+    fs.writeFileSync(file, JSON.stringify({ lists: { libraryDirNames: ['NewLibrary'] } }));
     const second = createLibMatcher(root);
     assert.ok(first('Old/a.c'));
     assert.ok(!first('NewLibrary/a.c'));
@@ -215,7 +223,7 @@ test('sync invalidates configuration and version changes and keeps project suppo
     assert.notStrictEqual(syncKeilTree(root).cacheHit, true);
     assert.ok(fs.readFileSync(path.join(kn, 'User/a.c')).equals(encodeCp936('// \u4e2d\u6587\n')));
     assert.strictEqual(syncKeilTree(root).cacheHit, true);
-    const stampFile = path.join(root, '.zkz', 'run', 'keil-native-stamp.json');
+    const stampFile = path.join(root, '.zkz', 'run', 'keil-stamp.json');
     const stamp = JSON.parse(fs.readFileSync(stampFile));
     stamp.version = -1;
     fs.writeFileSync(stampFile, JSON.stringify(stamp));
@@ -230,14 +238,14 @@ test('sync invalidates configuration and version changes and keeps project suppo
     fs.unlinkSync(path.join(root, support[0]));
     syncKeilTree(root);
     assert.ok(!fs.existsSync(path.join(kn, support[0])));
-    fs.writeFileSync(path.join(root, '.zkz', 'workspace_lists.json'), JSON.stringify({ libraryDirNames: ['User'] }));
+    fs.writeFileSync(path.join(root, '.zkz', 'settings.json'), JSON.stringify({ lists: { libraryDirNames: ['User'] } }));
     assert.notStrictEqual(syncKeilTree(root).cacheHit, true);
     assert.ok(fs.lstatSync(path.join(kn, 'User')).isSymbolicLink());
-    fs.writeFileSync(path.join(root, '.zkz', 'workspace_lists.json'), JSON.stringify({ libraryDirNames: [] }));
+    fs.writeFileSync(path.join(root, '.zkz', 'settings.json'), JSON.stringify({ lists: { libraryDirNames: [] } }));
     syncKeilTree(root);
     assert.ok(!fs.lstatSync(path.join(kn, 'User')).isSymbolicLink());
     // A configured library created later must be linked on the next operation.
-    fs.writeFileSync(path.join(root, '.zkz', 'workspace_lists.json'), JSON.stringify({ libraryDirNames: ['Later'] }));
+    fs.writeFileSync(path.join(root, '.zkz', 'settings.json'), JSON.stringify({ lists: { libraryDirNames: ['Later'] } }));
     syncKeilTree(root);
     fs.mkdirSync(path.join(root, 'Later'));
     syncKeilTree(root);
@@ -302,7 +310,7 @@ test('source snapshots handle staged edits, restored timestamps, new directories
     const write = fs.writeFileSync;
     try {
       fs.writeFileSync = function (p, ...args) {
-        if (path.basename(p).startsWith('lib-encoding-warnings.json.')) throw new Error('warning write failed');
+        if (path.basename(p).startsWith('encoding-lib-warnings.json.')) throw new Error('warning write failed');
         return write.call(this, p, ...args);
       };
       syncKeilTree(root);
@@ -363,6 +371,7 @@ test('encoding table cache detects replacements with a preserved mtime', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-table-stamp-'));
   try {
     const file = tablePath(root);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify({ files: { 'User/a.c': 'Gbk' } }));
     const time = new Date(1000000000000);
     fs.utimesSync(file, time, time);
@@ -902,27 +911,22 @@ test('roundtrip status ignores removed paths without deleting historical records
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('config_paths merges the old list into settings', () => {
+test('config paths come from settings and leave the old file', () => {
   const os = require('os');
   const path = require('path');
   const fs = require('fs');
-  const { atomicWriteJson, configPathsFile } = require('../src/paths');
+  const settings = require('../../shared/zkz_settings');
   const { loadConfigPaths } = require('../src/config_paths');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-cfgp-'));
+  const old = path.join(root, '.zkz', 'config_paths.json');
   try {
-    atomicWriteJson(configPathsFile(root), {
-      skipWorktree: ['.cursor'],
-      forbidStage: ['.vscode', 'AGENTS.md']
-    });
+    settings.set(root, 'native', 'paths', ['keep.txt']);
+    fs.mkdirSync(path.dirname(old), { recursive: true });
+    fs.writeFileSync(old, JSON.stringify({ skipWorktree: ['secret.txt'] }), 'utf8');
     const cfg = loadConfigPaths(root);
-    assert.ok(!fs.existsSync(configPathsFile(root)));
-    const stored = JSON.parse(fs.readFileSync(path.join(root, '.zkz', 'settings.json'), 'utf8'));
-    assert.ok(stored.native.paths.indexOf('.cursor') >= 0);
-    assert.ok(stored.native.paths.indexOf('AGENTS.md') >= 0);
-    assert.ok(cfg.overlay.indexOf('.cursor') >= 0);
-    assert.ok(cfg.overlay.indexOf('.vscode') >= 0);
-    assert.ok(cfg.overlay.indexOf('AGENTS.md') >= 0);
-    assert.ok(cfg.skipWorktree.indexOf('.cursor') >= 0);
+    assert.deepStrictEqual(cfg.paths, ['keep.txt']);
+    assert.ok(cfg.overlay.indexOf('secret.txt') < 0);
+    assert.strictEqual(fs.readFileSync(old, 'utf8').indexOf('secret.txt') >= 0, true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -1099,7 +1103,7 @@ test('tableDrift ignores same-branch commit and flags a branch switch', () => {
   const git = path.join(root, '.git');
   const oid = '0123456789abcdef0123456789abcdef01234567';
   const next = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-  const table = path.join(root, '.zkz', 'run', '.workspace_source_encodings.json');
+  const table = path.join(root, '.zkz', 'run', 'encoding-table.json');
   try {
     fs.mkdirSync(path.join(git, 'refs', 'heads'), { recursive: true });
     fs.writeFileSync(path.join(git, 'refs', 'heads', 'main'), next + '\n', 'utf8');
@@ -1649,13 +1653,13 @@ async function runAsync() {
     assert.strictEqual(detectKind(fs.readFileSync(path.join(dir, 'Libraries', 'lib.c'))), 'Gbk');
     assert.deepStrictEqual(st.unstable, []);
     const porcelain = git(['status', '--porcelain']);
-    assert.strictEqual(String(porcelain.stdout || '').trim(), '');
+    assert.strictEqual(sourcePorcelain(porcelain.stdout), '');
     const off = disable(dir);
     assert.strictEqual(off.installed, false);
     assert.strictEqual(off.leftover.length, 0);
     assert.strictEqual(detectKind(fs.readFileSync(path.join(dir, 'a.c'))), 'Gbk');
     const after = git(['status', '--porcelain']);
-    assert.strictEqual(String(after.stdout || '').trim(), '');
+    assert.strictEqual(sourcePorcelain(after.stdout), '');
     fs.rmSync(dir, { recursive: true, force: true });
     ok('enable smudges worktree to UTF-8 and status stays clean');
   } catch (e) {
@@ -1773,7 +1777,7 @@ async function runAsync() {
     assert.ok(back.files['a.c']);
     assert.strictEqual(back.files['b.c'], undefined);
     assert.strictEqual(loadTable(dir)['b.c'], undefined);
-    const blobFile = path.join(dir, '.zkz', 'run', 'encoding-by-blob.json');
+    const blobFile = path.join(dir, '.zkz', 'run', 'encoding-blob.json');
     const blobStamp = fs.statSync(blobFile).mtimeMs;
     const again = await buildTable(dir, { from: added, to: base });
     assert.strictEqual(again.cacheHit, true);
@@ -1900,7 +1904,7 @@ async function runAsync() {
   finish(extra);
 }
 
-test('lib tops read libraryDirNames from workspace_lists.json', () => {
+test('lib tops read libraryDirNames from settings.json', () => {
   const os = require('os');
   const fs = require('fs');
   const path = require('path');
@@ -1908,16 +1912,16 @@ test('lib tops read libraryDirNames from workspace_lists.json', () => {
   fs.mkdirSync(path.join(dir, '.zkz'), { recursive: true });
   fs.mkdirSync(path.join(dir, 'VendorLib'));
   fs.mkdirSync(path.join(dir, 'Libraries'));
-  fs.writeFileSync(path.join(dir, '.zkz', 'workspace_lists.json'), JSON.stringify({
-    libraryDirNames: ['VendorLib', 'Libraries']
+  fs.writeFileSync(path.join(dir, '.zkz', 'settings.json'), JSON.stringify({
+    lists: { libraryDirNames: ['VendorLib', 'Libraries'] }
   }), 'utf8');
   const { libTopNames, libTops, isLibRel } = require('../src/paths');
   assert.deepStrictEqual(libTopNames(dir), ['VendorLib', 'Libraries']);
   assert.deepStrictEqual(libTops(dir), ['VendorLib', 'Libraries']);
   assert.strictEqual(isLibRel(dir, 'VendorLib/src/a.c'), true);
   assert.strictEqual(isLibRel(dir, 'FreeRTOS/include/task.h'), false);
-  fs.writeFileSync(path.join(dir, '.zkz', 'workspace_lists.json'), JSON.stringify({
-    libraryDirNames: ['Libraries']
+  fs.writeFileSync(path.join(dir, '.zkz', 'settings.json'), JSON.stringify({
+    lists: { libraryDirNames: ['Libraries'] }
   }), 'utf8');
   assert.deepStrictEqual(libTopNames(dir), ['Libraries']);
 });
@@ -1929,8 +1933,8 @@ test('library attributes cancel -text so autocrlf still applies', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-attr-'));
   fs.mkdirSync(path.join(dir, '.zkz'), { recursive: true });
   fs.mkdirSync(path.join(dir, 'Libraries'));
-  fs.writeFileSync(path.join(dir, '.zkz', 'workspace_lists.json'), JSON.stringify({
-    libraryDirNames: ['Libraries', 'output.hex']
+  fs.writeFileSync(path.join(dir, '.zkz', 'settings.json'), JSON.stringify({
+    lists: { libraryDirNames: ['Libraries', 'output.hex'] }
   }), 'utf8');
   const { attributesBody } = require('../src/git_config');
   const body = attributesBody(dir);
@@ -2518,7 +2522,7 @@ test('resmudge rewrites stat-clean GBK worktree to UTF-8', () => {
   git(['commit', '-q', '-m', 'init']);
   fs.mkdirSync(path.join(dir, '.zkz', 'run'), { recursive: true });
   fs.writeFileSync(
-    path.join(dir, '.zkz', 'run', '.workspace_source_encodings.json'),
+    path.join(dir, '.zkz', 'run', 'encoding-table.json'),
     JSON.stringify({ files: { 'a.c': 'Gbk' } }),
     'utf8'
   );
@@ -2564,7 +2568,7 @@ test('disable restore writes CRLF so autocrlf status stays clean', () => {
   git(['commit', '-q', '-m', 'init']);
   fs.mkdirSync(path.join(dir, '.zkz', 'run'), { recursive: true });
   fs.writeFileSync(
-    path.join(dir, '.zkz', 'run', '.workspace_source_encodings.json'),
+    path.join(dir, '.zkz', 'run', 'encoding-table.json'),
     JSON.stringify({ files: { 'a.c': 'Gbk' } }),
     'utf8'
   );
@@ -2599,7 +2603,7 @@ test('disable restore keeps CRLF blobs from showing as empty edits', () => {
   fs.utimesSync(path.join(dir, 'a.c'), future, future);
   fs.mkdirSync(path.join(dir, '.zkz', 'run'), { recursive: true });
   fs.writeFileSync(
-    path.join(dir, '.zkz', 'run', '.workspace_source_encodings.json'),
+    path.join(dir, '.zkz', 'run', 'encoding-table.json'),
     JSON.stringify({ files: { 'a.c': 'Gbk+crlf' } }),
     'utf8'
   );
@@ -2610,27 +2614,6 @@ test('disable restore keeps CRLF blobs from showing as empty edits', () => {
   assert.strictEqual(String(st.stdout || '').trim(), '');
   const cached = git(['diff', '--cached', '--numstat', '--', 'a.c']);
   assert.strictEqual(String(cached.stdout || '').trim(), '');
-  fs.rmSync(dir, { recursive: true, force: true });
-});
-
-test('runtime files move from .zkz into .zkz/run', () => {
-  const os = require('os');
-  const fs = require('fs');
-  const path = require('path');
-  const { tablePath, keilStampPath, relocateRunFiles } = require('../src/paths');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-run-'));
-  const zkz = path.join(dir, '.zkz');
-  fs.mkdirSync(zkz, { recursive: true });
-  fs.writeFileSync(path.join(zkz, '.workspace_source_encodings.json'), '{"a.c":"Utf8"}\n', 'utf8');
-  fs.writeFileSync(path.join(zkz, 'keil-native-stamp.json'), '{}\n', 'utf8');
-  fs.mkdirSync(path.join(zkz, 'locks'));
-  fs.writeFileSync(path.join(zkz, 'locks', 'x.lock'), '1', 'utf8');
-  relocateRunFiles(dir);
-  assert.strictEqual(fs.existsSync(path.join(zkz, '.workspace_source_encodings.json')), false);
-  assert.strictEqual(fs.readFileSync(tablePath(dir), 'utf8'), '{"a.c":"Utf8"}\n');
-  assert.strictEqual(fs.readFileSync(keilStampPath(dir), 'utf8'), '{}\n');
-  assert.strictEqual(fs.existsSync(path.join(zkz, 'locks')), false);
-  assert.strictEqual(fs.readFileSync(path.join(zkz, 'run', 'locks', 'x.lock'), 'utf8'), '1');
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -2787,7 +2770,7 @@ test('disable restore keeps uncommitted edits in the original encoding', () => {
   git(['add', 'a.c']);
   git(['commit', '-q', '-m', 'init']);
   fs.mkdirSync(path.join(dir, '.zkz', 'run'), { recursive: true });
-  fs.writeFileSync(path.join(dir, '.zkz', 'run', '.workspace_source_encodings.json'), JSON.stringify({
+  fs.writeFileSync(path.join(dir, '.zkz', 'run', 'encoding-table.json'), JSON.stringify({
     files: { 'a.c': 'Gbk' }
   }), 'utf8');
   fs.writeFileSync(path.join(dir, 'a.c'), Buffer.from(edited, 'utf8'));
@@ -3075,7 +3058,7 @@ test('same-branch encoding table records the new commit without rewriting files'
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-table-head-'));
   try {
     saveTable(root, { 'User/a.c': 'Utf8' });
-    const file = path.join(root, '.zkz', 'run', '.workspace_source_encodings.json');
+    const file = path.join(root, '.zkz', 'run', 'encoding-table.json');
     const obj = JSON.parse(fs.readFileSync(file, 'utf8'));
     obj.head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
     obj.ref = 'refs/heads/main';

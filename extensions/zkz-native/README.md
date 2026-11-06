@@ -15,7 +15,7 @@
 - **smudge（检出）**：blob → UTF-8
 - **clean（add/commit）**：UTF-8 → 原编码
 
-编码表在本机 `.zkz/run/.workspace_source_encodings.json`（不进仓库），按路径决定每个文件怎么转。新文件第一次 clean 或同步编烧树时按当前编码登记：ASCII、UTF-8、UTF-8 BOM、GBK 均保留原字节（包括 BOM 和换行），不改工作区文件。UTF-8 新文件可以包含 GBK 无法表示的字符。后续提交和编烧树同步按登记的编码处理；已有文件仍按原编码表处理。
+编码表在本机 `.zkz/run/encoding-table.json`（不进仓库），按路径决定每个文件怎么转。新文件第一次 clean 或同步编烧树时按当前编码登记：ASCII、UTF-8、UTF-8 BOM、GBK 均保留原字节（包括 BOM 和换行），不改工作区文件。UTF-8 新文件可以包含 GBK 无法表示的字符。后续提交和编烧树同步按登记的编码处理；已有文件仍按原编码表处理。
 
 `native.enabled`、`native.glob`、`native.local` 写在 `.zkz/settings.json`。过滤器开或关以本机 git 配置为准（`zkz-native.enable` / `disable`）。`native.local` 是本地配置开关，扩展把它同步到本机 `zkz.localconfig`。没有这项时沿用当前开关，不因为补上默认值而关掉。
 
@@ -29,7 +29,7 @@
 | `zkz-native.syncKeilTree` | 把工作区 clean 到 `.zkz/keil-native/` |
 | `zkz-native.toggleLocalConfig` | 开关本地配置。开着时，给 `.zkz/settings.json` 里 `native.paths` 的已跟踪路径打上 `skip-worktree`，更改里不出现工作区修改。替身在检出、拉取、合并、变基、拣选、还原，以及 `reset --hard`、`--merge`、`--keep` 开始时把这些路径改名挪进 `.zkz/local`，结束后删掉 Git 写出的再挪回来。改名失败才逐个复制。`pre-commit` 把这些路径的索引收回 HEAD 的 blob，不改工作区 |
 
-`.zkz/settings.json` 的 `native.paths` 是本地配置名单。旧的 `.zkz/config_paths.json` 会在读取时并进这份名单后删除。开关记在本机 `zkz.localconfig`。开着时提交这些路径交出的是 HEAD 里的 blob，本机修改留在工作区。关掉之后，去掉 `skip-worktree`，差异重新出现在更改里。
+`.zkz/settings.json` 的 `native.paths` 是本地配置名单。开关记在本机 `zkz.localconfig`。开着时提交这些路径交出的是 HEAD 里的 blob，本机修改留在工作区。关掉之后，去掉 `skip-worktree`，差异重新出现在更改里。
 
 状态栏只显示 `native 开` 或 `native 关`。点开菜单后，编码过滤器是一条「过滤器 开 / 关」，点击切换。悬停是编码表和失败记录。调试 axf 由 `zkz-keil` 准备调试时从真源产物拷到 `.zkz/output.axf`。`git diff` / `git blame` 仍走 `textconv`，Git 自己把结果写入 `refs/notes/textconv/zkznative`。
 
@@ -39,7 +39,7 @@ git hook 只保留 `pre-commit` / `pre-push`（挡坏提交/推送）。本地�
 
 过滤器异常时运行 **zkz-native.disable** 即可卸掉（只改 `.git/config` 与 attributes，不依赖 filter 进程）。
 
-历史 GBK 里解不出的字节用私用区字符（U+E000 起，低 8 位是原字节）带到工作区，clean 时写回原字节，因此不会让 `git status` 一直脏，也不记往返失败。工作区里已经出现的 U+FFFD 仍直接丢掉，并记在 `.zkz/run/roundtrip-failures.json` 的 `drops` 里（文件、clean 或 smudge、个数和位置），不写入 `files`，不拦提交。同一方向下一次过滤不再删字符时清掉对应记录。这些文件还在、或提交被拒绝时，悬停列出路径。表情等 cp936 没有的字符仍记入同一文件的 `files`。`pre-commit` / `pre-push` 会拦编码不对的 blob，并把最近一次拒绝写到 `.zkz/run/commit-reject.json`，状态栏可据此重新暂存或打开文件。握手被拒时写 `.zkz/run/handshake-reject.json`（含首包 hex）。
+历史 GBK 里解不出的字节用私用区字符（U+E000 起，低 8 位是原字节）带到工作区，clean 时写回原字节，因此不会让 `git status` 一直脏，也不记往返失败。工作区里已经出现的 U+FFFD 仍直接丢掉，并记在 `.zkz/run/encoding-roundtrip.json` 的 `drops` 里（文件、clean 或 smudge、个数和位置），不写入 `files`，不拦提交。同一方向下一次过滤不再删字符时清掉对应记录。这些文件还在、或提交被拒绝时，悬停列出路径。表情等 cp936 没有的字符仍记入同一文件的 `files`。`pre-commit` / `pre-push` 会拦编码不对的 blob，并把最近一次拒绝写到 `.zkz/run/commit-reject.json`，状态栏可据此重新暂存或打开文件。握手被拒时写 `.zkz/run/handshake-reject.json`（含首包 hex）。
 
 `ZKZ_NATIVE_LOG=1` 时写 `.zkz/run/zkz-native.log`。
 
@@ -52,7 +52,7 @@ git hook 只保留 `pre-commit` / `pre-push`（挡坏提交/推送）。本地�
 3. 把 hex/axf 拷回真源 `Project` 产物路径
 4. gdb map 用 `substitute-path 编烧树 → 真源`
 
-库目录在编烧树里是 junction，名单是 `.zkz/workspace_lists.json` 的 `libraryDirNames`。没有这项时用内置默认（Libraries、FreeRTOS、Modbus_zlg、FPU_DSP、RL-ARM、emWin、fatfs、USB）。真源根上已经是链接的目录也会链上。改完后重新加载窗口，再同步编烧树。axf 里若已是真源路径则不要误 substitute。
+库目录在编烧树里是 junction，名单是 `.zkz/settings.json` 的 `lists.libraryDirNames`。没有这项时用内置默认（Libraries、FreeRTOS、Modbus_zlg、FPU_DSP、RL-ARM、emWin、fatfs、USB）。真源根上已经是链接的目录也会链上。改完后重新加载窗口，再同步编烧树。axf 里若已是真源路径则不要误 substitute。
 
 ## 内存与缓存优化
 
@@ -62,7 +62,7 @@ Git 使用长驻 `filter.zkznative.process` 在同一进程内处理多个文件
 
 过滤失败状态在进程首次成功请求时检查并清零，后续成功请求跳过重复读取；中途失败会使该缓存失效，下一次成功重新清零。GBK 往返失败的记录与检查仍独立执行。
 
-`roundtrip-failures.json` 保留历史诊断；状态统计忽略当前已不存在的文件路径，避免删除或迁移目录后的旧告警持续显示。仍存在的文件不会因记录较旧而隐藏，成功执行 GBK clean 后才清除对应失败项。
+`encoding-roundtrip.json` 保留历史诊断；状态统计忽略当前已不存在的文件路径，避免删除或迁移目录后的旧告警持续显示。仍存在的文件不会因记录较旧而隐藏，成功执行 GBK clean 后才清除对应失败项。
 
 过滤进程启动及每次编烧树同步时刷新库目录集合快照，操作中的路径匹配只查询内存 Set，不逐文件检查配置；修改库目录配置应等待当前 Git 操作结束再执行下一条命令。其他操作使用按配置文件路径、mtime、ctime 和大小校验的动态缓存，最多保留 8 个仓库。过滤响应仍按包分帧，攒到最多 1MB 再写出并等待背压，避免检出大量 GBK 文件时每 64KB 往返一次。不再为整文件另分配一份响应缓冲区。转码本身仍要读入整个文件。
 
@@ -86,4 +86,4 @@ stamp 的失效条件包括算法版本、HEAD、分支、编码映射内容和�
 - 非 `.c/.h`（如 `.uvproj`）保持原字节，工具可能乱码。
 - VS Code 内置内联 diff 左侧对 GBK blob 仍可能乱码；CLI `git diff` 有 textconv。
 - 表里没有的已跟踪文件按索引 blob 登记，不按工作区 UTF-8 登记。GBK 文件改名后若暂存成了 UTF-8，提交会被拒绝，编码表改回 GBK，需要重新 `git add`。原先登记为 ASCII 的文件一旦写入中文，能进 cp936 的会改记为 GBK 再提交。
-- 库目录不过滤，编码没有 clean 兜底；编烧树里仍是 junction。改过的库 `.c/.h` 会在同步编烧树、提交和推送时巡检：HEAD 为 GBK 而当前变成 UTF-8，或出现 U+FFFD，会写入 `.zkz/run/lib-encoding-warnings.json` 并告警，不改文件、不拦编译、不拦提交。
+- 库目录不过滤，编码没有 clean 兜底；编烧树里仍是 junction。改过的库 `.c/.h` 会在同步编烧树、提交和推送时巡检：HEAD 为 GBK 而当前变成 UTF-8，或出现 U+FFFD，会写入 `.zkz/run/encoding-lib-warnings.json` 并告警，不改文件、不拦编译、不拦提交。

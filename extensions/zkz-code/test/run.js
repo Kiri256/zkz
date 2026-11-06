@@ -561,6 +561,21 @@ test('compile_commands stamp follows the branch, not the commit', () => {
     }) + '\n', 'utf8');
     fs.writeFileSync(path.join(git, 'HEAD'), 'ref: refs/heads/main\n', 'utf8');
     assert.ok(isCompileCommandsBranchStale(dir));
+    const { set } = require('../../shared/zkz_settings');
+    const { isCompileCommandsLayoutStale } = require('../src/cc_stamp');
+    writeCompileCommandsStamp(dir, { flavor: 'f429', target: 'Flash' });
+    assert.ok(!isCompileCommandsLayoutStale(dir));
+    set(dir, 'keil', 'flavor', 'h750');
+    assert.ok(isCompileCommandsLayoutStale(dir));
+    writeCompileCommandsStamp(dir, { flavor: 'h750', target: 'H750_N' });
+    assert.ok(!isCompileCommandsLayoutStale(dir));
+    set(dir, 'keil', 'h750.target', 'Other');
+    assert.ok(isCompileCommandsLayoutStale(dir));
+    fs.writeFileSync(path.join(dir, '.zkz', 'run', 'compile-commands-stamp.json'), JSON.stringify({
+      version: 1,
+      branch: 'refs/heads/main'
+    }) + '\n', 'utf8');
+    assert.ok(!isCompileCommandsLayoutStale(dir));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

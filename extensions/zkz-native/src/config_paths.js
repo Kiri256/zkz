@@ -1,7 +1,6 @@
 'use strict';
 
-const fs = require('fs');
-const { configPathsFile, slashRel } = require('./paths');
+const { slashRel } = require('./paths');
 const loadShared = require('./load_shared');
 const settings = loadShared('zkz_settings');
 
@@ -36,32 +35,15 @@ function listsFromRaw(raw) {
   return uniqRels([raw.skipWorktree, raw.overlay, raw.forbidStage]);
 }
 
-function readOldFile(repoRoot) {
-  const file = configPathsFile(repoRoot);
-  try {
-    if (!fs.existsSync(file)) return [];
-    return listsFromRaw(JSON.parse(fs.readFileSync(file, 'utf8')));
-  } catch (_) {
-    return [];
-  }
-}
-
 function settingsPaths(repoRoot) {
   const native = settings.load(repoRoot).native;
   if (!native || !Array.isArray(native.paths)) return [];
   return listsFromRaw(native.paths);
 }
 
+/** 读 settings.json 的 native.paths。空名单用内置默认。返回 skip-worktree 用的路径。扩展宿主或过滤进程调用。 */
 function loadConfigPaths(repoRoot) {
   let paths = settingsPaths(repoRoot);
-  const old = readOldFile(repoRoot);
-  if (old.length) {
-    paths = uniqRels([paths, old]);
-    try {
-      settings.set(repoRoot, 'native', 'paths', paths);
-      fs.unlinkSync(configPathsFile(repoRoot));
-    } catch (_) { /* 下次再迁 */ }
-  }
   if (!paths.length) paths = DEFAULT_PATHS.paths.slice();
   const local = paths.filter((rel) => !isZkzInternal(rel));
   return {
@@ -80,13 +62,10 @@ function matchesPrefix(rel, prefixes) {
   return false;
 }
 
+/** 把本地配置名单写回 settings.json 的 native.paths。空名单写成内置默认。扩展宿主调用。 */
 function saveConfigPaths(repoRoot, obj) {
   const paths = listsFromRaw(obj);
   settings.set(repoRoot, 'native', 'paths', paths.length ? paths : DEFAULT_PATHS.paths.slice());
-  try {
-    const old = configPathsFile(repoRoot);
-    if (fs.existsSync(old)) fs.unlinkSync(old);
-  } catch (_) { /* ignore */ }
 }
 
 module.exports = {

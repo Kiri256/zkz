@@ -19,10 +19,11 @@
 | 触发 | 效果 |
 | --- | --- |
 | 启动 | 刷徽章、对齐基线；约 600ms 后折已打开的源文件（宏未齐最多再试 4 次） |
-| 保存 `yt_version.h` | 同步表；白名单变了软重启 clangd（连续保存合并成一次）；全量有变则重折 |
-| 磁盘上 `yt_version.h` 变了 | 400ms 防抖静默同步；有变才重折 |
+| 保存 `yt_version.h` | 同步表；宏变了在右下角询问是否清空 clangd 索引（连续保存合并成一次），点「清空索引」后整份删除并重启，预编译头保留；全量有变则重折 |
+| 磁盘上 `yt_version.h` 变了 | 400ms 防抖同步；宏变了同样在右下角询问是否清空索引；有变才重折 |
 | `.clangd` 保存/监视 | 失效宏表，重折，刷徽章 |
-| 换分支（`.git/HEAD` 指向变了） | 同步宏，白名单变了软重启 clangd；刷新 `compile_commands` 时弹出通知。失败时 zkz-code 状态栏变黄，重载窗口后仍变黄，直到这次分支的编译数据库写成功。同分支提交、撤回不触发，也不把状态栏标黄 |
+| 换分支（`.git/HEAD` 指向变了） | 同步宏，宏变了在右下角询问是否清空 clangd 索引；刷新 `compile_commands` 时弹出通知。失败时 zkz-code 状态栏变黄，重载窗口后仍变黄，直到这次分支的编译数据库写成功。同分支提交、撤回不触发，也不把状态栏标黄 |
+| `.zkz/settings.json` 里 `keil.flavor` 或当前机型的 target 变了 | 按新机型重写 `compile_commands`，弹出通知。折叠开关等其它设置不触发。标记里还没有机型时，下次成功生成之后才开始比较 |
 | 工作区文件夹变化 | 刷徽章 |
 | 打开或切到 `.c/.cpp` | 只套折叠，不刷表 |
 
@@ -43,6 +44,6 @@
 
 状态栏只有 zkz-code 一条。菜单里是打开或关闭折叠、刷新折叠、恢复 CMSIS Include、刷新 `compile_commands`、重启 clangd、清空 `index` 目录，以及当前启用的宏。点宏名直接跳到定义。编译数据库没跟上当前分支时这条变黄，重载窗口后也还在。都不出现在编辑器标题栏或右键菜单。
 
-`macroKeys` 读真源 `.zkz/workspace_lists.json`。同一文件的 `libraryDirNames` 给 zkz-native 决定编烧树里哪些目录做成链接。
+`macroKeys` 读真源 `.zkz/settings.json` 的 `lists`。同一节的 `libraryDirNames` 给 zkz-native 决定编烧树里哪些目录做成链接。
 
 `compile_commands` 使用 `fast-xml-parser` 校验并解析工程 XML，支持属性、注释、CDATA、自闭合节点和数字实体；只从 `Project/Targets/Target` 选择编译目标，忽略调试选项中的嵌套 Target。Cads 支持实际工程的 `TargetArmAds` 层级。格式损坏时报告行号，避免生成部分数据库。工程 XML、目录、机型和目标没变时，先用内存里的结果，没有再读 `.zkz/run/compile-commands-cache.json`。两边都没有才解析，并写回内存和这个文件。内容和现有 `compile_commands.json` 相同时不改写。

@@ -1,6 +1,6 @@
 'use strict';
 /**
- * 手动清空 .cache/clangd/index 并软重启。自动路径只重启，不删索引。
+ * 清空 .cache/clangd/index 并软重启。预编译头保留。yt_version.h 变更时由弹窗决定是否调用。
  */
 const fs = require('fs');
 const path = require('path');

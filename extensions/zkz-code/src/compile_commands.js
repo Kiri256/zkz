@@ -261,7 +261,7 @@ async function generateOnRoot(root, log) {
   const dst = path.join(root, 'compile_commands.json');
   writeIfChanged(src, text);
   if (path.resolve(src) !== path.resolve(dst)) writeIfChanged(dst, text);
-  try { writeCompileCommandsStamp(root); } catch (_) { /* ignore */ }
+  try { writeCompileCommandsStamp(root, { flavor: flavor, target: targetName }); } catch (_) { /* ignore */ }
   if (log) log('compile_commands.json ready: ' + dst + ' (' + cached.entries.length + ')');
   recordPerf(root, 'zkz-code.generateCompileCommands', {
     ms: Number(process.hrtime.bigint() - perfStart) / 1e6,

@@ -84,13 +84,13 @@ function report(progress, message) {
   if (progress && typeof progress.report === 'function') progress.report({ message: message });
 }
 
-/** 「编译调试」不确认机型。调试会话还在时问是否断开。扩展宿主线程调用。 */
+/** 「编译调试」不确认机型。调试会话还在时用右下角提示问是否断开。扩展宿主线程调用。 */
 async function confirmDebugDisconnect() {
   if (!vscode.debug.activeDebugSession) return;
   const pick = await vscode.window.showWarningMessage(
     '烧录会断开当前调试，继续？',
-    { modal: true },
-    '继续烧录'
+    '继续烧录',
+    '稍后'
   );
   if (pick !== '继续烧录') quietCancel();
 }

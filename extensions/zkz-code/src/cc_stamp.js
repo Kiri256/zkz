@@ -36,15 +36,7 @@ function readHeadName(repoRoot) {
 }
 
 function compileCommandsStampPath(root) {
-  const from = path.join(root, '.zkz', 'compile-commands-stamp.json');
-  const to = path.join(root, '.zkz', 'run', 'compile-commands-stamp.json');
-  try {
-    if (fs.existsSync(from) && !fs.existsSync(to)) {
-      fs.mkdirSync(path.dirname(to), { recursive: true });
-      fs.renameSync(from, to);
-    }
-  } catch (_) { /* ignore */ }
-  return to;
+  return path.join(root, '.zkz', 'run', 'compile-commands-stamp.json');
 }
 
 function readCompileCommandsStamp(root) {
@@ -55,12 +47,15 @@ function readCompileCommandsStamp(root) {
   }
 }
 
-function writeCompileCommandsStamp(root) {
+function writeCompileCommandsStamp(root, layout) {
   if (!root) return;
+  const info = layout || {};
   fs.mkdirSync(path.dirname(compileCommandsStampPath(root)), { recursive: true });
   fs.writeFileSync(compileCommandsStampPath(root), JSON.stringify({
     version: 1,
-    branch: readHeadName(root)
+    branch: readHeadName(root),
+    flavor: info.flavor || '',
+    target: info.target || ''
   }, null, 2) + '\n', 'utf8');
 }
 
@@ -79,11 +74,34 @@ function isCompileCommandsBranchStale(root) {
   return stamp.branch !== name;
 }
 
+function currentKeilLayout(root) {
+  const loadShared = require('./load_shared');
+  const { resolveKeilLayout, layoutOptionsFromGet } = loadShared('keil_layout');
+  const { get } = loadShared('zkz_settings');
+  return resolveKeilLayout(root, layoutOptionsFromGet(function (key, fallback) {
+    return get(root, 'keil', key, fallback);
+  }));
+}
+
+// 编译数据库是否还停在另一个机型或目标。标记里没有机型时不算，避免旧标记一启动就重写。扩展宿主调用。
+function isCompileCommandsLayoutStale(root) {
+  if (!root) return false;
+  const cc = path.join(root, 'compile_commands.json');
+  if (!fs.existsSync(cc)) return false;
+  const stamp = readCompileCommandsStamp(root);
+  if (!stamp || !stamp.flavor) return false;
+  let layout;
+  try { layout = currentKeilLayout(root); } catch (_) { return false; }
+  if (!layout) return false;
+  return stamp.flavor !== layout.flavor || (stamp.target || '') !== (layout.defaultTarget || '');
+}
+
 module.exports = {
   readHeadName,
   gitDirOf,
   compileCommandsStampPath,
   readCompileCommandsStamp,
   writeCompileCommandsStamp,
-  isCompileCommandsBranchStale
+  isCompileCommandsBranchStale,
+  isCompileCommandsLayoutStale
 };

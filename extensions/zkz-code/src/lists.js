@@ -5,15 +5,13 @@ const path = require('path');
 const loadShared = require('./load_shared');
 
 const BUNDLED_PATH = path.join(__dirname, 'workspace_lists.json');
-const REL_JSON = path.join('.zkz', 'workspace_lists.json');
-const REL_JSONC = path.join('.zkz', 'workspace_lists.jsonc');
 
 const FALLBACK = {
   syncAll: false,
   verifyAll: false,
   libraryDirNames: ['Libraries', 'FreeRTOS', 'Modbus_zlg', 'FPU_DSP', 'RL-ARM', 'emWin', 'fatfs', 'USB'],
   skipTopDirNames: ['.git', '.svn', '.hg', 'Project', '.vscode', '.cursor', '.codex', '.claude', '.continue', '.windsurf', '.idea', '.vs', '.cache', '.clangd', '.clangd-index', '.clangd-cache', 'ai_dialog', 'tools', 'zkz', 'pc_other', 'node_modules', '__pycache__'],
-  skipTopFileNames: ['compile_commands.json', '.clangd', '.clang-format', '.clang-tidy', '.gitignore', '.gitattributes', '.editorconfig', 'AGENTS.md', 'CLAUDE.md', '.workspace_source_encodings.json', 'output.hex'],
+  skipTopFileNames: ['compile_commands.json', '.clangd', '.clang-format', '.clang-tidy', '.gitignore', '.gitattributes', '.editorconfig', 'AGENTS.md', 'CLAUDE.md', 'encoding-table.json', 'output.hex'],
   textExtensions: ['.c', '.h', '.cpp', '.hpp', '.cc', '.hh', '.cxx'],
   excludeDirNames: ['.git', '.svn', '.hg', '.vscode', '.cursor', '.codex', '.claude', '.continue', '.windsurf', '.idea', '.vs', '.cache', '.clangd', '.clangd-index', '.clangd-cache', 'Flash', 'Obj', 'Listings', 'DebugConfig', 'node_modules', '__pycache__', 'ai_dialog', 'tools', '.zkz'],
   excludeFileNames: ['JLinkLog.txt', 'JLinkSettings.ini', 'build_output.txt', 'flash_output.txt'],
@@ -54,42 +52,26 @@ function workspaceListsRoot() {
   }
 }
 
-function findWorkspaceListsFile() {
-  const root = workspaceListsRoot();
+/** 读 settings.json 的 lists。没有这项返回 null。扩展宿主调用。 */
+function settingsLists(root) {
   if (!root) return null;
-  const json = path.join(root, REL_JSON);
-  const jsonc = path.join(root, REL_JSONC);
-  if (fs.existsSync(json) && fs.statSync(json).isFile()) return json;
-  if (fs.existsSync(jsonc) && fs.statSync(jsonc).isFile()) return jsonc;
-  return null;
-}
-
-function seedWorkspaceLists() {
-  const existing = findWorkspaceListsFile();
-  if (existing) return existing;
-  const destRoot = workspaceListsRoot();
-  if (!destRoot) return null;
-  const zkzDir = path.join(destRoot, '.zkz');
-  if (!fs.existsSync(zkzDir) || !fs.statSync(zkzDir).isDirectory()) return null;
-  const dest = path.join(zkzDir, 'workspace_lists.json');
-  if (fs.existsSync(dest)) return dest;
   try {
-    if (fs.existsSync(BUNDLED_PATH)) fs.copyFileSync(BUNDLED_PATH, dest);
-    else fs.writeFileSync(dest, JSON.stringify(FALLBACK, null, 2), 'utf8');
-    return dest;
+    const cur = loadShared('zkz_settings').load(root);
+    const lists = cur && cur.lists;
+    if (!lists || typeof lists !== 'object' || Array.isArray(lists)) return null;
+    return lists;
   } catch (_) {
     return null;
   }
 }
 
+/** 合并内置名单和 settings.json 的 lists。返回合并后的对象。扩展宿主调用。 */
 function loadWorkspaceLists() {
-  const used = findWorkspaceListsFile() || seedWorkspaceLists() || BUNDLED_PATH;
-  const key = fileStamp(used) + '|' + fileStamp(BUNDLED_PATH);
+  const root = workspaceListsRoot();
+  const settingsPath = root ? path.join(root, '.zkz', 'settings.json') : '';
+  const key = fileStamp(settingsPath) + '|' + fileStamp(BUNDLED_PATH);
   if (cached.data && cached.key === key) return cached.data;
-  let overlay = {};
-  try {
-    if (used && fs.existsSync(used)) overlay = readListsFile(used) || {};
-  } catch (_) { overlay = {}; }
+  const overlay = settingsLists(root) || {};
   let bundled = {};
   try {
     if (fs.existsSync(BUNDLED_PATH)) bundled = readListsFile(BUNDLED_PATH) || {};
@@ -100,6 +82,5 @@ function loadWorkspaceLists() {
 }
 
 module.exports = {
-  loadWorkspaceLists,
-  findWorkspaceListsFile
+  loadWorkspaceLists
 };
