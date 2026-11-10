@@ -278,6 +278,20 @@ function indexOidMap(repoRoot) {
 }
 
 // 索引里 stage 0 的路径和 blob。只刷新文件时间不会变。读不到索引返回空串。扩展宿主调用。
+// 索引里 stage 0 的 .c/.h。读不到索引返回 null。扩展宿主调用。
+function indexSourcePaths(repoRoot) {
+  const map = indexOidMap(repoRoot);
+  if (!map) return null;
+  const out = [];
+  for (const rel of map.keys()) {
+    const dot = rel.lastIndexOf('.');
+    if (dot < 0) continue;
+    const ext = rel.slice(dot + 1).toLowerCase();
+    if (ext === 'c' || ext === 'h') out.push(rel);
+  }
+  return out;
+}
+
 function indexBlobFingerprint(repoRoot) {
   const map = indexOidMap(repoRoot);
   if (!map) return '';
@@ -573,6 +587,8 @@ module.exports = {
   tryCatFileBatch,
   indexBlobOid,
   indexBlobFingerprint,
+  indexOidMap,
+  indexSourcePaths,
   indexIdentity,
   closeCatSessions
 };

@@ -15,7 +15,7 @@
 - **smudge（检出）**：blob → UTF-8
 - **clean（add/commit）**：UTF-8 → 原编码
 
-编码表在本机 `.zkz/run/encoding-table.json`（不进仓库），按路径决定每个文件怎么转。新文件第一次 clean 或同步编烧树时按当前编码登记：ASCII、UTF-8、UTF-8 BOM、GBK 均保留原字节（包括 BOM 和换行），不改工作区文件。UTF-8 新文件可以包含 GBK 无法表示的字符。后续提交和编烧树同步按登记的编码处理；已有文件仍按原编码表处理。
+编码表在本机 `.zkz/run/encoding-table.json`（不进仓库），按路径决定每个文件怎么转。新文件第一次 clean 或同步编烧树时按当前编码登记：ASCII、UTF-8、UTF-8 BOM、GBK 均保留原字节（包括 BOM 和换行），不改工作区文件。UTF-8 新文件可以包含 GBK 无法表示的字符。后续提交和编烧树同步按登记的编码处理；已有文件仍按原编码表处理。表里记下当时的索引 blob 集合。提交号和这份集合都没变时，直接用已有表，不再遍历路径。
 
 `native.enabled`、`native.glob`、`native.local` 写在 `.zkz/settings.json`。过滤器开或关以本机 git 配置为准（`zkz-native.enable` / `disable`）。`native.local` 是本地配置开关，扩展把它同步到本机 `zkz.localconfig`。没有这项时沿用当前开关，不因为补上默认值而关掉。
 
@@ -27,7 +27,7 @@
 | `zkz-native.disable` | 卸 filter，按编码表把工作区编回原编码；未提交的修改保留 |
 | `zkz-native.refreshTable` | 按 HEAD 重建编码表 |
 | `zkz-native.syncKeilTree` | 把工作区 clean 到 `.zkz/keil-native/` |
-| `zkz-native.toggleLocalConfig` | 开关本地配置。开着时，给 `.zkz/settings.json` 里 `native.paths` 的已跟踪路径打上 `skip-worktree`，更改里不出现工作区修改。替身在检出、拉取、合并、变基、拣选、还原，以及 `reset --hard`、`--merge`、`--keep` 开始时把这些路径改名挪进 `.zkz/local`，结束后删掉 Git 写出的再挪回来。改名失败才逐个复制。`pre-commit` 把这些路径的索引收回 HEAD 的 blob，不改工作区 |
+| `zkz-native.toggleLocalConfig` | 开关本地配置。开着时，给 `.zkz/settings.json` 里 `native.paths` 的已跟踪路径打上 `skip-worktree`，更改里不出现工作区修改。替身在检出、拉取、合并、变基、拣选、还原，以及 `reset --hard`、`--merge`、`--keep` 开始时把这些路径改名挪进 `.zkz/local`，结束后删掉 Git 写出的再挪回来。目录改名失败时先逐个改名文件，单个文件改不走才复制内容。`pre-commit` 把这些路径的索引收回 HEAD 的 blob，不改工作区 |
 
 `.zkz/settings.json` 的 `native.paths` 是本地配置名单。开关记在本机 `zkz.localconfig`。开着时提交这些路径交出的是 HEAD 里的 blob，本机修改留在工作区。关掉之后，去掉 `skip-worktree`，差异重新出现在更改里。
 
@@ -68,7 +68,7 @@ Git 使用长驻 `filter.zkznative.process` 在同一进程内处理多个文件
 
 pkt-line 输入使用分块队列，收到数据时不再复制全部未消费内容；包落在同一块时使用 Buffer 视图，跨块时仅复制该包。队列达到约 256 KiB 时暂停输入，消费到约 64 KiB 时恢复，避免消费者等待输出时继续接收大量数据；阈值不包含上游内部缓冲，单个输入块也可能超过阈值。消费完的块会释放队列引用，避免长期积累。协议头或负载被截断、长度非法时会拒绝当前读取；输入流错误保留原始异常并拒绝待处理及后续读取，输出错误或提前关闭也会拒绝写入。判断编码只扫字节，遇到非法 UTF-8 就停，不再把整文件解码成字符串。表里的种类和 blob 不一致时仍以字节为准。GBK 正文的转码仍要读完整个文件。此优化没有把整体过滤改成流式转码，也没有设置文件大小上限。
 
-编烧树另有磁盘 stamp 与完成标记。完成标记还在，并且索引里的 blob 没变时，已跟踪且没被点名的文件沿用 stamp 里的 blob 戳，不再逐个 stat。工作区相对索引的改动仍重写。索引文件只是被刷新了时间、blob 集合没变，同样沿用。改动和未忽略的未跟踪文件用同一次 `git status --porcelain=v1 -z --untracked-files=all --no-renames` 列出。只取相对索引有改动的路径；已暂存、工作区已经一致的不在这份名单里，并检查上次不是 blob 戳的路径、skip-worktree，以及项目里的 `.sct/.ini/.scf`。blob 变了，或还没有这份 blob 指纹时，仍用 `git ls-files --cached --others --exclude-standard -z` 枚举后逐个取戳。已暂存、blob 真的变了，就走这一路。stamp 保存上次成功同步的源文件元数据，因此修改撤销后仍能恢复编烧字节；已暂存但源文件不再变化时无需反复复制。Git 枚举失败，或这些仍要读取的源文件权限异常，会中止同步，不当作缓存命中。这些缓存与 Git 过滤进程的内存表相互独立。
+编烧树另有磁盘 stamp 与完成标记。完成标记还在，并且索引里的 blob 没变时，已跟踪且没被点名的文件沿用 stamp 里的 blob 戳，不再逐个 stat。工作区相对索引的改动仍重写。索引文件只是被刷新了时间、blob 集合没变，同样沿用。改动和未忽略的未跟踪文件用 `git status --porcelain=v1 -z --untracked-files=normal --no-renames` 列出；未跟踪目录再展开成文件，跳过的顶层目录不展开。没有任何改动和未跟踪文件、并且戳都是 blob 时，不再 stat 已跟踪源文件。项目辅助文件仍会看一遍，以便发现被忽略的新脚本。编烧副本仍逐个看时间戳。只取相对索引有改动的路径；已暂存、工作区已经一致的不在这份名单里，并检查上次不是 blob 戳的路径、skip-worktree，以及项目里的 `.sct/.ini/.scf`。blob 变了，或还没有这份 blob 指纹时，仍用 `git ls-files --cached --others --exclude-standard -z` 枚举后逐个取戳。已暂存、blob 真的变了，就走这一路。stamp 保存上次成功同步的源文件元数据，因此修改撤销后仍能恢复编烧字节；已暂存但源文件不再变化时无需反复复制。Git 枚举失败，或这些仍要读取的源文件权限异常，会中止同步，不当作缓存命中。这些缓存与 Git 过滤进程的内存表相互独立。
 
 stamp 的失效条件包括算法版本、HEAD、分支、编码映射内容和库目录快照。编码规则、库分类或库目录存在情况变化时全量重建；缺少完成标记或旧版本 stamp 也会全量重建，覆盖中断操作已写出的文件。项目目录的 `Obj/Flash` 等跳过目录仍保留 `.sct/.ini/.scf`，其他编译产物继续跳过。
 

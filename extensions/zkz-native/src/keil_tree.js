@@ -459,14 +459,14 @@ function listSkipped(repoRoot) {
   return list;
 }
 
-// 一次列出工作区改动和未跟踪文件。只看相对索引的工作区列，已暂存但工作区一致的不在这里。git 失败返回 null。扩展宿主调用。
+// 一次列出工作区改动和未跟踪文件。目录只记一行，需要时再展开。跳过的顶层目录不展开。git 失败返回 null。扩展宿主调用。
 function listWorktreeChanges(repoRoot) {
   const started = process.hrtime.bigint();
-  const r = git(repoRoot, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'], { allowFail: true });
-  const ms = Number(process.hrtime.bigint() - started) / 1e6;
+  const r = git(repoRoot, ['status', '--porcelain=v1', '-z', '--untracked-files=normal', '--no-renames'], { allowFail: true });
   if (!r || r.status !== 0) return null;
   const dirty = new Set();
   const untracked = [];
+  const dirs = [];
   String(r.stdout || '').split('\0').forEach((rec) => {
     if (rec.length < 4) return;
     const x = rec.charAt(0);
@@ -474,10 +474,25 @@ function listWorktreeChanges(repoRoot) {
     const name = rec.charAt(2) === ' ' ? rec.slice(3) : rec.slice(2);
     if (!name) return;
     const rel = slashRel(name);
-    if (x === '?' && y === '?') untracked.push(rel);
-    else if (y !== ' ') dirty.add(rel);
+    if (x === '?' && y === '?') {
+      const top = rel.split('/')[0].replace(/\/$/, '');
+      if (skipDirName(top)) return;
+      if (rel.endsWith('/')) dirs.push(rel);
+      else untracked.push(rel);
+    } else if (y !== ' ') dirty.add(rel);
   });
-  return { dirty: dirty, untracked: untracked, ms: ms };
+  if (dirs.length) {
+    const listed = git(repoRoot, ['ls-files', '--others', '--exclude-standard', '-z', '--'].concat(dirs), { allowFail: true });
+    if (!listed || listed.status !== 0) {
+      dirs.forEach((dir) => untracked.push(dir.replace(/\/$/, '')));
+    } else {
+      String(listed.stdout || '').split('\0').filter(Boolean).forEach((item) => {
+        const rel = slashRel(item);
+        if (!skipDirName(rel.split('/')[0])) untracked.push(rel);
+      });
+    }
+  }
+  return { dirty: dirty, untracked: untracked, ms: Number(process.hrtime.bigint() - started) / 1e6 };
 }
 
 // 供还没问过工作区的扫描使用。git 失败返回 null。扩展宿主调用。
@@ -491,6 +506,28 @@ function noteSource(rel, current, previous, library, files, libraryFiles, dirty)
   if (current !== ((previous && previous[rel]) || '')) dirty.add(rel);
 }
 
+// 被 Git 忽略的项目辅助文件不在 status 里。有新文件时不能走空闲快照。扩展宿主调用。
+function missingProjectFile(repoRoot, stamp) {
+  const projects = collectProjectRels(repoRoot);
+  for (let i = 0; i < projects.length; i++) {
+    if (!stamp.files || !stamp.files[projects[i]]) return true;
+  }
+  return false;
+}
+
+// 戳都是 blob、又没有点名改动时，源文件不用再扫。编烧副本仍由调用方逐个看。扩展宿主调用。
+function idleSourceReady(stamp, isLibraryPath, skipped) {
+  const files = stamp.files || {};
+  for (const rel of Object.keys(files)) {
+    if (isLibraryPath(rel) || !blobStamp(files[rel]) || skipped.has(rel)) return false;
+  }
+  const libs = stamp.libraryFiles || {};
+  for (const rel of Object.keys(libs)) {
+    if (!isLibraryPath(rel) || !blobStamp(libs[rel]) || skipped.has(rel)) return false;
+  }
+  return true;
+}
+
 // 已跟踪且没被点名的文件沿用 blob 戳。点名的改动、未跟踪、skip-worktree 和项目辅助文件仍读取。返回和全量扫描相同的快照。扩展宿主调用。
 function reuseSourceSnapshot(repoRoot, stamp, isLibraryPath, topDirs, worktreeDirty, index, indexBlobs, untracked, gitListMs) {
   const started = process.hrtime.bigint();
@@ -501,6 +538,21 @@ function reuseSourceSnapshot(repoRoot, stamp, isLibraryPath, topDirs, worktreeDi
   const dirty = new Set();
   const paths = new Set();
   const named = worktreeDirty || new Set();
+  const extra = untracked || [];
+  if (worktreeDirty instanceof Set && named.size === 0 && extra.length === 0 && idleSourceReady(stamp, isLibraryPath, skipped) && !missingProjectFile(repoRoot, stamp)) {
+    return {
+      files: Object.assign({}, stamp.files),
+      libraryFiles: Object.assign({}, stamp.libraryFiles || {}),
+      dirty: dirty,
+      worktreeDirty: worktreeDirty,
+      gitListMs: gitListMs || 0,
+      sourceScanMs: Number(process.hrtime.bigint() - started) / 1e6,
+      index: index,
+      indexBlobs: indexBlobs || '',
+      skipped: (stamp.skipped || []).slice(),
+      sourceReuse: true
+    };
+  }
   const keep = (rel, stored) => blobStamp(stored) && !skipped.has(rel) && !named.has(rel);
   Object.keys(stamp.files || {}).forEach((rel) => {
     if (!isLibraryPath(rel) && keep(rel, stamp.files[rel])) files[rel] = stamp.files[rel];

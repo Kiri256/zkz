@@ -1,13 +1,13 @@
 'use strict';
 
 // 本地配置。已跟踪路径打 skip-worktree，更改里不出现工作区修改。
-// 替身在一次切换开始时把清单路径改名挪进 .zkz/local，结束后删掉 Git 写出来的再挪回来。改名失败才逐个复制。
+// 替身在一次切换开始时把清单路径改名挪进 .zkz/local，结束后删掉 Git 写出来的再挪回来。目录改名失败时先逐个改名文件，单个文件改不走才复制内容。
 // 提交前把索引收回 HEAD 的 blob，不改工作区。
 
 const fs = require('fs');
 const path = require('path');
 const { slashRel, localKeepRoot, runDir, atomicWriteFile } = require('./paths');
-const { git, gitConfigGet } = require('./git_exec');
+const { git, gitConfigGet, indexOidMap } = require('./git_exec');
 
 const loadShared = require('./load_shared');
 
@@ -61,9 +61,19 @@ function readLocalKeep(repoRoot, rel) {
   }
 }
 
+// 名单里已经在索引中的路径。索引读不到时再问 git。扩展宿主或替身调用。
 function trackedLocalFiles(repoRoot) {
   const list = localList(repoRoot);
   if (!list.length) return [];
+  const map = indexOidMap(repoRoot);
+  if (map) {
+    const out = [];
+    for (const rel of map.keys()) {
+      if (onLocalList(rel, list)) out.push(rel);
+    }
+    out.sort();
+    return out;
+  }
   const r = git(repoRoot, ['ls-files', '-z', '--'].concat(list), { allowFail: true });
   if (!r || r.status !== 0 || !r.stdout) return [];
   return String(r.stdout).split('\0').filter(Boolean).map(slashRel);
@@ -383,14 +393,32 @@ function parkPrefix(repoRoot, rel) {
   }
 }
 
+// 整个目录改不走时，逐个改名。gitkeep 留在原地，避免目录变空。改名失败才复制内容。返回收进副本的路径。替身调用。
 function copyPrefix(repoRoot, rel) {
   const files = listDiskFiles(repoRoot, rel);
   const out = [];
   for (let i = 0; i < files.length; i++) {
-    saveLocalKeep(repoRoot, files[i], fs.readFileSync(worktreeFile(repoRoot, files[i])));
-    out.push(files[i]);
+    const file = files[i];
+    if (isGitkeep(file)) continue;
+    if (!moveFileToKeep(repoRoot, file)) {
+      saveLocalKeep(repoRoot, file, fs.readFileSync(worktreeFile(repoRoot, file)));
+    }
+    out.push(file);
   }
   return out;
+}
+
+function moveFileToKeep(repoRoot, rel) {
+  const abs = worktreeFile(repoRoot, rel);
+  const dest = keepFile(repoRoot, rel);
+  try {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    if (pathExists(dest)) fs.unlinkSync(dest);
+    fs.renameSync(abs, dest);
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 // 改名没成功时，把副本里的文件写回工作区。
@@ -547,14 +575,27 @@ function shimRestore(argv) {
   }
 }
 
+// 副本是改名过去的就改名回来。目标占着时再覆盖写。写回成功返回 true。替身调用。
+function restoreCopiedFile(repo, rel) {
+  const src = keepFile(repo, rel);
+  const dst = worktreeFile(repo, rel);
+  try {
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    if (pathExists(dst)) fs.unlinkSync(dst);
+    fs.renameSync(src, dst);
+    return true;
+  } catch (_) { /* 文件被占住时改名失败，改为覆盖写回 */ }
+  const data = readLocalKeep(repo, rel);
+  if (!data) return false;
+  atomicWriteFile(dst, data);
+  return true;
+}
+
 function restoreLocal(repo, file, parsed, noteFallback) {
   const restored = [];
   for (let i = 0; i < parsed.copied.length; i++) {
     const rel = parsed.copied[i];
-    const data = readLocalKeep(repo, rel);
-    if (!data) continue;
-    atomicWriteFile(worktreeFile(repo, rel), data);
-    restored.push(rel);
+    if (restoreCopiedFile(repo, rel)) restored.push(rel);
   }
   for (let i = 0; i < parsed.moved.length; i++) {
     const rel = parsed.moved[i];
