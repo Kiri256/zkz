@@ -3,6 +3,7 @@
 // 编译并配置 git.exe 替身。替身放在扩展目录，不放进仓库。
 // 切分支、拉取、合并、变基、拣选、还原，以及 reset 的 --hard、--merge、--keep 时，
 // 它先让 Git 看到没改过，跑完再把副本写回。
+// show、diff、blame、log 会补上 --textconv，并丢掉关掉 textconv 的参数。
 
 const fs = require('fs');
 const path = require('path');
@@ -59,6 +60,50 @@ function wrapsInvocation(argv) {
     if (a === '--hard' || a === '--merge' || a === '--keep') return true;
   }
   return false;
+}
+
+const TEXTCONV_COMMAND = { show: 1, diff: 1, blame: 1, log: 1 };
+
+// diff.<驱动>.textconv 被设成空。返回是否要丢掉这项。测试与替身规则相同。
+function blankTextconvAssignment(text) {
+  const m = /^diff\.[^.=]+\.textconv=(.*)$/.exec(String(text || ''));
+  if (!m) return false;
+  const v = m[1].trim();
+  return v === '' || v === '""' || v === "''";
+}
+
+// 给 show/diff/blame/log 补上 --textconv，去掉 --no-textconv 和把驱动设空的 -c。返回新参数。测试调用。
+function forceTextconvArgs(argv) {
+  const args = argv ? argv.slice() : [];
+  const parsed = parseGitInvocation(args);
+  if (parsed.index < 0 || !TEXTCONV_COMMAND[parsed.command]) return args;
+  const cmdAt = parsed.index;
+  let end = args.length;
+  for (let i = cmdAt + 1; i < args.length; i++) {
+    if (args[i] === '--') {
+      end = i;
+      break;
+    }
+  }
+  const out = [];
+  for (let i = 0; i < end; i++) {
+    const a = args[i];
+    if (i < cmdAt && a === '-c' && i + 1 < end && blankTextconvAssignment(args[i + 1])) {
+      i++;
+      continue;
+    }
+    if (i < cmdAt && a.length > 2 && a.indexOf('-c') === 0 && blankTextconvAssignment(a.slice(2))) continue;
+    if (a === '--no-textconv') continue;
+    out.push(a);
+  }
+  let has = false;
+  for (let i = 0; i < out.length; i++) if (out[i] === '--textconv') has = true;
+  if (!has) {
+    const again = parseGitInvocation(out);
+    if (again.index >= 0) out.splice(again.index + 1, 0, '--textconv');
+  }
+  for (let i = end; i < args.length; i++) out.push(args[i]);
+  return out;
 }
 
 function slashPath(p) {
@@ -139,6 +184,8 @@ module.exports = {
   parseGitInvocation,
   wrapsCommand,
   wrapsInvocation,
+  blankTextconvAssignment,
+  forceTextconvArgs,
   isShimGitExe,
   isShimBin,
   shimExePath,

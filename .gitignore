@@ -4,3 +4,4 @@ __pycache__
 *.vsix
 .vscode
 extensions/zkz-native/bin/
+*.hex

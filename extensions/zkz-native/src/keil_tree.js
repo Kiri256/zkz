@@ -9,7 +9,7 @@ const {
   slashRel, keilNativeRoot, keilStampPath, isSourceExt,
   DEFAULT_SKIP_DIR, libTops, libTopNames, createLibMatcher, isReparse, atomicWriteJson
 } = require('./paths');
-const { currentHead, currentBranch, gitText, git, indexBlobOid, indexBlobFingerprint, indexIdentity, catFileBatchSync } = require('./git_exec');
+const { currentHead, currentBranch, gitText, git, indexBlobOid, indexBlobFingerprint, indexIdentity } = require('./git_exec');
 const { acquireLock, releaseLock } = require('./lock');
 const { inspectLibEncoding, formatLibWarning, loadLibWarnings, saveLibWarnings } = require('./lib_encoding');
 const loadShared = require('./load_shared');
@@ -144,216 +144,17 @@ function skipWorktreeSet(repoRoot) {
   return set;
 }
 
-const KEIL_CACHE_LIMIT = 4;
-// 哪些提交已有编烧树。本进程的顺序；文件只在顺序变化时写。
-const gKeilOrder = { root: '', text: '', order: null };
-
 function commitOid(value) {
   const oid = String(value || '').trim().toLowerCase();
   return /^[0-9a-f]{40}$/.test(oid) ? oid : '';
 }
 
-function keilCacheRoot(repoRoot) {
-  return path.join(path.dirname(keilStampPath(repoRoot)), 'keil-cache');
+// 换提交的编烧树缓存已停用。同步时删掉残留，避免继续占磁盘。扩展宿主调用。
+function removeKeilCache(repoRoot) {
+  const dir = path.join(path.dirname(keilStampPath(repoRoot)), 'keil-cache');
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) { /* 删不掉就留着，不再读取 */ }
 }
 
-function keilCacheSlot(repoRoot, oid) {
-  return path.join(keilCacheRoot(repoRoot), oid);
-}
-
-// 读本进程里的编烧缓存顺序。没有就读文件。返回提交号数组。扩展宿主调用。
-function loadKeilOrder(repoRoot) {
-  if (gKeilOrder.root === repoRoot && Array.isArray(gKeilOrder.order)) return gKeilOrder.order.slice();
-  const file = path.join(keilCacheRoot(repoRoot), 'order.json');
-  let order = [];
-  try { order = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { order = []; }
-  if (!Array.isArray(order)) order = [];
-  gKeilOrder.root = repoRoot;
-  gKeilOrder.order = order.slice();
-  gKeilOrder.text = JSON.stringify(order);
-  return order;
-}
-
-// 记下编烧缓存顺序。没变不写文件。扩展宿主调用。
-function storeKeilOrder(repoRoot, order) {
-  const text = JSON.stringify(order);
-  gKeilOrder.root = repoRoot;
-  gKeilOrder.order = order.slice();
-  if (gKeilOrder.text === text) return;
-  const root = keilCacheRoot(repoRoot);
-  fs.mkdirSync(root, { recursive: true });
-  fs.writeFileSync(path.join(root, 'order.json'), text, 'utf8');
-  gKeilOrder.text = text;
-}
-
-function rememberKeilOrder(repoRoot, oid, pin) {
-  const root = keilCacheRoot(repoRoot);
-  let order = loadKeilOrder(repoRoot);
-  order = order.filter((item) => item !== oid);
-  order.push(oid);
-  while (order.length > KEIL_CACHE_LIMIT) {
-    let dropped = false;
-    for (let i = 0; i < order.length; i++) {
-      if (order[i] === oid || order[i] === pin) continue;
-      const drop = order.splice(i, 1)[0];
-      try { fs.rmSync(path.join(root, drop), { recursive: true, force: true }); } catch (_) { /* ignore */ }
-      dropped = true;
-      break;
-    }
-    if (!dropped) break;
-  }
-  storeKeilOrder(repoRoot, order);
-}
-
-function cachedStamp(repoRoot, oid) {
-  return readJson(path.join(keilCacheSlot(repoRoot, oid), 'stamp.json'), null);
-}
-
-function fullTreeReady(repoRoot, oid) {
-  const cached = cachedStamp(repoRoot, oid);
-  if (!cached || cached.complete !== true || cached.version !== SYNC_VERSION) return false;
-  // 整棵 tree 在，就按树换。戳上残留的 manifest 不能把这份树丢掉。
-  return fs.existsSync(path.join(keilCacheSlot(repoRoot, oid), 'tree', SYNC_READY_FILE));
-}
-
-function manifestReady(repoRoot, oid) {
-  const cached = cachedStamp(repoRoot, oid);
-  return !!(cached && cached.manifest === true && cached.complete === true && cached.version === SYNC_VERSION);
-}
-
-function cacheFile(root, rel) {
-  return path.join(root, ...slashRel(rel).split('/'));
-}
-
-// 不是 git blob 的编烧副本才需要另存。blob 以后用 git 取回。扩展宿主调用。
-function parkKeilManifest(repoRoot, oid, kn, stamp, pin, isLibraryPath) {
-  const slot = keilCacheSlot(repoRoot, oid);
-  const tmp = slot + '.tmp';
-  fs.rmSync(tmp, { recursive: true, force: true });
-  fs.mkdirSync(tmp, { recursive: true });
-  const extras = [];
-  try {
-    Object.keys(stamp.files || {}).forEach((rel) => {
-      if (blobStamp(stamp.files[rel]) || skipSyncPath(rel) || isLibraryPath(rel)) return;
-      const src = cacheFile(kn, rel);
-      let st = null;
-      try { st = fs.statSync(src); } catch (_) { return; }
-      if (!st.isFile()) return;
-      const dst = cacheFile(path.join(tmp, 'extra'), rel);
-      fs.mkdirSync(path.dirname(dst), { recursive: true });
-      fs.copyFileSync(src, dst);
-      extras.push(rel);
-    });
-    writeJson(path.join(tmp, 'stamp.json'), Object.assign({}, stamp, { manifest: true, extras: extras }));
-    fs.rmSync(slot, { recursive: true, force: true });
-    fs.renameSync(tmp, slot);
-  } catch (err) {
-    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) { /* ignore */ }
-    throw err;
-  }
-  rememberKeilOrder(repoRoot, oid, pin);
-}
-
-function writeKeilBytes(repoRoot, kn, rel, bytes) {
-  ensureRealParent(repoRoot, kn, rel);
-  const dst = cacheFile(kn, rel);
-  fs.mkdirSync(path.dirname(dst), { recursive: true });
-  fs.writeFileSync(dst, bytes);
-}
-
-// 按清单把编烧树补成那个提交。相同的戳留着，变了的从 git 或 extra 取。成功返回清单。扩展宿主调用。
-function applyKeilManifest(repoRoot, kn, fromStamp, oid, isLibraryPath) {
-  const slot = keilCacheSlot(repoRoot, oid);
-  const cached = cachedStamp(repoRoot, oid);
-  if (!cached || cached.manifest !== true || cached.complete !== true || cached.version !== SYNC_VERSION) return null;
-  const fromFiles = (fromStamp && fromStamp.files) || {};
-  const toFiles = cached.files || {};
-  Object.keys(fromFiles).forEach((rel) => {
-    if (toFiles[rel] || skipSyncPath(rel) || isLibraryPath(rel)) return;
-    const dst = cacheFile(kn, rel);
-    try {
-      if (fs.existsSync(dst) && fs.statSync(dst).isFile()) fs.unlinkSync(dst);
-    } catch (_) { /* ignore */ }
-  });
-  const jobs = [];
-  const copies = [];
-  Object.keys(toFiles).forEach((rel) => {
-    if (skipSyncPath(rel) || isLibraryPath(rel)) return;
-    if (fromFiles[rel] && fromFiles[rel] === toFiles[rel]) {
-      try {
-        if (fs.statSync(cacheFile(kn, rel)).isFile()) return;
-      } catch (_) { /* 目标不是文件，按缺失重新取出 */ }
-    }
-    if (blobStamp(toFiles[rel])) jobs.push({ rel: rel, oid: toFiles[rel].slice(2) });
-    else copies.push(rel);
-  });
-  if (jobs.length) {
-    const recs = catFileBatchSync(repoRoot, jobs.map((job) => job.oid));
-    for (let i = 0; i < jobs.length; i++) {
-      const rec = recs[i];
-      if (!rec || rec.missing) return null;
-      writeKeilBytes(repoRoot, kn, jobs[i].rel, rec.data);
-    }
-  }
-  for (let i = 0; i < copies.length; i++) {
-    const rel = copies[i];
-    const src = cacheFile(path.join(slot, 'extra'), rel);
-    if (!fs.existsSync(src)) continue;
-    writeKeilBytes(repoRoot, kn, rel, fs.readFileSync(src));
-  }
-  return cached;
-}
-
-function parkKeilRename(repoRoot, oid, kn, stamp, pin) {
-  const slot = keilCacheSlot(repoRoot, oid);
-  fs.rmSync(slot, { recursive: true, force: true });
-  fs.mkdirSync(slot, { recursive: true });
-  fs.renameSync(kn, path.join(slot, 'tree'));
-  // 整棵树自己就是正文。清掉清单标记，避免下次把 tree 当成没有副本的清单。
-  const parked = Object.assign({}, stamp);
-  delete parked.manifest;
-  delete parked.extras;
-  writeJson(path.join(slot, 'stamp.json'), parked);
-  rememberKeilOrder(repoRoot, oid, pin);
-}
-
-function takeKeilCache(repoRoot, oid, kn) {
-  const slot = keilCacheSlot(repoRoot, oid);
-  const tree = path.join(slot, 'tree');
-  const stampFile = path.join(slot, 'stamp.json');
-  if (!fs.existsSync(tree) || !fs.existsSync(stampFile)) return null;
-  const cached = readJson(stampFile, null);
-  if (!cached || cached.complete !== true || cached.version !== SYNC_VERSION) return null;
-  fs.renameSync(tree, kn);
-  try { fs.rmSync(slot, { recursive: true, force: true }); } catch (_) { /* ignore */ }
-  try {
-    storeKeilOrder(repoRoot, loadKeilOrder(repoRoot).filter((item) => item !== oid));
-  } catch (_) { /* ignore */ }
-  return cached;
-}
-
-// 换提交时留下清单。旧的整棵缓存仍改名换上。没有清单就只存非 blob 文件，当前树按差异改。返回换上的清单。扩展宿主调用。
-function swapKeilCache(repoRoot, kn, stamp, head, isLibraryPath) {
-  const fromOid = commitOid(stamp && stamp.head);
-  const toOid = commitOid(head);
-  if (!fromOid || !toOid || fromOid === toOid) return null;
-  if (!stamp || stamp.complete !== true || stamp.version !== SYNC_VERSION) return null;
-  if (!fs.existsSync(path.join(kn, SYNC_READY_FILE))) return null;
-  const library = isLibraryPath || function () { return false; };
-  if (fullTreeReady(repoRoot, toOid)) {
-    parkKeilRename(repoRoot, fromOid, kn, stamp, toOid);
-    try {
-      const taken = takeKeilCache(repoRoot, toOid, kn);
-      if (taken) return taken;
-    } catch (_) { /* 换不上就把刚挪走的树搬回来 */ }
-    const parked = path.join(keilCacheSlot(repoRoot, fromOid), 'tree');
-    if (!fs.existsSync(kn) && fs.existsSync(parked)) fs.renameSync(parked, kn);
-    return null;
-  }
-  parkKeilManifest(repoRoot, fromOid, kn, stamp, toOid, library);
-  if (!manifestReady(repoRoot, toOid)) return null;
-  return applyKeilManifest(repoRoot, kn, stamp, toOid, library);
-}
 
 // 内容已经对上索引时，把时间戳改回 blob。索引里没有这个路径则不动。无返回值。扩展宿主调用。
 function rememberBlob(repoRoot, rel, files, libraryFiles) {
@@ -364,21 +165,7 @@ function rememberBlob(repoRoot, rel, files, libraryFiles) {
   if (libraryFiles && Object.prototype.hasOwnProperty.call(libraryFiles, rel)) libraryFiles[rel] = blob;
 }
 
-function dropCleanWorktree(repoRoot, stamp, dirty, kn, files, libraryFiles) {
-  const local = diffNameSet(repoRoot, ['HEAD']);
-  if (!local) return;
-  const skipped = skipWorktreeSet(repoRoot);
-  for (const rel of Array.from(dirty)) {
-    const previous = (stamp.files && stamp.files[rel]) || '';
-    if (!previous) continue;
-    if (skipped.has(rel) || local.has(rel)) continue;
-    if (!fs.existsSync(path.join(kn, rel))) continue;
-    dirty.delete(rel);
-    rememberBlob(repoRoot, rel, files, libraryFiles);
-  }
-}
-
-// 检出只改了时间戳、内容仍等于提交时，从脏集合拿掉，并把源戳改回 blob。无返回值。扩展宿主调用。
+// 上次已是 blob、这次提交也没改内容时，从脏集合拿掉。时间戳说明副本可能是未入库修改，检出丢掉后还要重写。无返回值。扩展宿主调用。
 function relaxUnchangedBlobs(repoRoot, stamp, head, dirty, files, libraryFiles) {
   const from = String(stamp.head || '').trim().toLowerCase();
   const to = String(head || '').trim().toLowerCase();
@@ -390,7 +177,7 @@ function relaxUnchangedBlobs(repoRoot, stamp, head, dirty, files, libraryFiles) 
   for (const rel of Array.from(dirty)) {
     const previous = (stamp.files && stamp.files[rel]) || (stamp.libraryFiles && stamp.libraryFiles[rel]) || '';
     const current = (files && files[rel]) || (libraryFiles && libraryFiles[rel]) || '';
-    if (!previous || !current) continue;
+    if (!blobStamp(previous) || !blobStamp(current)) continue;
     if (skipped.has(rel) || changed.has(rel) || local.has(rel)) continue;
     dirty.delete(rel);
     rememberBlob(repoRoot, rel, files, libraryFiles);
@@ -677,14 +464,6 @@ function writeSourceOrCopy(repoRoot, kn, table, rel, isLibraryPath) {
   }
 }
 
-// 换树之后目标文件的时间都变了。只写了其中几个时，其余也记下新时间，否则下次同提交会整批重写。无返回值。扩展宿主线程调用。
-function refreshRestoredTargets(kn, nextStamp) {
-  Object.keys(nextStamp.files || {}).forEach((rel) => {
-    const cur = fileStamp(path.join(kn, rel));
-    if (cur) nextStamp.targets[rel] = cur;
-  });
-}
-
 function syncOne(repoRoot, kn, table, stamp, nextStamp, rel, full, dirty, isLibraryPath, worktreeDirty, skipped) {
   if (skipSyncPath(rel)) return 'skipped';
   // 库由 junction 统一挂载：绝不逐文件拷贝/删除（否则会写进 junction 目标即真实仓库，或把 junction 内容删空）。
@@ -771,18 +550,10 @@ function syncKeilTree(repoRoot, emit) {
   const libraryTops = libTops(repoRoot);
   const libraries = [libTopNames(repoRoot).sort(), libraryTops.slice().sort()];
   const readyFile = path.join(kn, SYNC_READY_FILE);
-  let stamp = readJson(keilStampPath(repoRoot), { files: {} });
+  removeKeilCache(repoRoot);
+  const stamp = readJson(keilStampPath(repoRoot), { files: {} });
   const head = currentHead(repoRoot);
   const branch = currentBranch(repoRoot);
-  let restored = false;
-  try {
-    const swapped = swapKeilCache(repoRoot, kn, stamp, head, isLibraryPath);
-    if (swapped) {
-      stamp = swapped;
-      writeJson(keilStampPath(repoRoot), stamp);
-      restored = true;
-    }
-  } catch (_) { /* 留不下缓存就按当前这棵树继续 */ }
   if (!fs.existsSync(kn)) fs.mkdirSync(kn, { recursive: true });
   const topDirs = listTopDirs(repoRoot, libraryTops);
   // 换分支只让 mtime 变了的文件变脏。整棵重写留给戳版本、缺清单这种结构破坏。
@@ -812,10 +583,6 @@ function syncKeilTree(repoRoot, emit) {
   const worktreeDirty = snapshot.worktreeDirty;
   const skippedSet = new Set(snapshot.skipped || []);
   if (!full) relaxUnchangedBlobs(repoRoot, stamp, head, dirty, snapshot.files, snapshot.libraryFiles);
-  // 清单换上时，非 blob 的副本可能和工作区不一致，不能因为工作区干净就跳过重写。
-  if (!full && restored && !stamp.manifest && commitOid(stamp.head) === commitOid(head)) {
-    dropCleanWorktree(repoRoot, stamp, dirty, kn, snapshot.files, snapshot.libraryFiles);
-  }
   // git diff 会刷新同秒写入的索引。戳记刷新之后的，下次同提交才能沿用。
   const indexSettled = indexIdentity(repoRoot);
   if (indexSettled) snapshot.index = indexSettled;
@@ -825,17 +592,12 @@ function syncKeilTree(repoRoot, emit) {
     }
   }
   const targetCheckStart = process.hrtime.bigint();
-  // 编烧副本被外部盖过就要重写。换树命中时这一遍记下新时间，不再扫第二遍。
-  const refreshedTargets = {};
+  // 编烧副本被外部盖过就要重写。
   if (!full) {
     for (const rel of Object.keys(stamp.files || {})) {
       if (isLibraryPath(rel)) continue;
       const current = fileStamp(path.join(kn, rel));
-      if (!current) dirty.add(rel);
-      else if (current !== stamp.targets[rel]) {
-        if (restored) refreshedTargets[rel] = current;
-        else dirty.add(rel);
-      }
+      if (!current || current !== stamp.targets[rel]) dirty.add(rel);
     }
   }
   const timings = {
@@ -843,12 +605,6 @@ function syncKeilTree(repoRoot, emit) {
     targetCheckMs: Number(process.hrtime.bigint() - targetCheckStart) / 1e6,
     sourceReuse: !!snapshot.sourceReuse
   };
-  // 换上来的树里，库和时间戳目录不会重写。留在 dirty 里会挡住整棵命中。
-  if (restored) {
-    for (const rel of Array.from(dirty)) {
-      if (isLibraryPath(rel) || skipSyncPath(rel)) dirty.delete(rel);
-    }
-  }
   const clean = !full && dirty.size === 0;
 
   let junctioned = 0;
@@ -882,10 +638,6 @@ function syncKeilTree(repoRoot, emit) {
       stamp.files[rel] = snapshot.files[rel];
       stampMoved = true;
     });
-    Object.keys(refreshedTargets).forEach((rel) => {
-      stamp.targets[rel] = refreshedTargets[rel];
-      stampMoved = true;
-    });
     if (snapshot.index && stamp.index !== snapshot.index) {
       stamp.index = snapshot.index;
       stampMoved = true;
@@ -911,7 +663,6 @@ function syncKeilTree(repoRoot, emit) {
       dirty: dirty.size,
       full: false,
       cacheHit: true,
-      treeCacheHit: restored,
       ...timings
     });
     return {
@@ -1001,7 +752,6 @@ function syncKeilTree(repoRoot, emit) {
   }
   pruned += removed;
 
-  if (restored) refreshRestoredTargets(kn, nextStamp);
   nextStamp.complete = true;
   nextStamp.fingerprint = syncFingerprint(table, libraries);
   const libDirty = [];

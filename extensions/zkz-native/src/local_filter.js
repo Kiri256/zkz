@@ -1,7 +1,7 @@
 'use strict';
 
 // 本地配置。已跟踪路径打 skip-worktree，更改里不出现工作区修改。
-// 替身在一次切换开始时把清单路径改名挪进 .zkz/local，结束后删掉 Git 写出来的再挪回来。目录改名失败时先逐个改名文件，单个文件改不走才复制内容。
+// 替身在一次切换开始时把清单路径改名挪进 .zkz/local，结束后删掉 Git 写出来的再挪回来。目录改名失败才逐个复制。列不全时不当成空目录，也不删工作区或副本。
 // 提交前把索引收回 HEAD 的 blob，不改工作区。
 
 const fs = require('fs');
@@ -192,8 +192,14 @@ function forgetSnapList(repoRoot, listFile) {
     return;
   }
   const parsed = parseSnap(text);
-  for (let i = 0; i < parsed.copied.length; i++) removeLocalKeep(repoRoot, parsed.copied[i]);
   let pending = false;
+  for (let i = 0; i < parsed.copied.length; i++) {
+    const rel = parsed.copied[i];
+    if (!pathExists(keepFile(repoRoot, rel))) continue;
+    // 上次没放回去的副本先写回工作区。写不回就留着，不能直接删。
+    if (!restoreCopiedFile(repoRoot, rel)) pending = true;
+    else removeLocalKeep(repoRoot, rel);
+  }
   for (let i = 0; i < parsed.moved.length; i++) {
     const rel = parsed.moved[i];
     const dest = keepFile(repoRoot, rel);
@@ -239,12 +245,13 @@ function dirBusy(err) {
   return !!(err && (err.code === 'EPERM' || err.code === 'EACCES' || err.code === 'EBUSY' || err.code === 'ENOENT' || err.code === 'ENOTDIR'));
 }
 
-// 从任意目录列出普通文件。符号链接不跟着走。目录被 Cursor 占住时跳过，不让这次切换失败。
+// 列出普通文件。符号链接不跟着走。目录被占住或列不全时返回 null，空数组只表示确实没有文件。扩展宿主或替身调用。
 function listTreeFiles(abs, rel) {
   let st;
   try { st = fs.lstatSync(abs); }
   catch (err) {
-    if (dirBusy(err)) return [];
+    if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return [];
+    if (dirBusy(err)) return null;
     throw err;
   }
   if (st.isDirectory()) {
@@ -252,12 +259,13 @@ function listTreeFiles(abs, rel) {
     let names = [];
     try { names = fs.readdirSync(abs); }
     catch (err) {
-      if (dirBusy(err)) return [];
+      if (dirBusy(err)) return null;
       throw err;
     }
     for (let i = 0; i < names.length; i++) {
       const child = slashRel(rel) + '/' + names[i];
       const nested = listTreeFiles(path.join(abs, names[i]), child);
+      if (nested === null) return null;
       for (let j = 0; j < nested.length; j++) out.push(nested[j]);
     }
     return out;
@@ -356,6 +364,8 @@ function unparkPrefix(repoRoot, rel) {
     } catch (_) { return false; }
   }
   const files = listTreeFiles(dest, rel);
+  // 列不全时两边都别动。当成空目录会把工作区和副本一起删掉。
+  if (files === null) return false;
   for (let i = 0; i < files.length; i++) {
     if (isGitkeep(files[i])) moveSnapshotFile(repoRoot, files[i]);
   }
@@ -363,7 +373,9 @@ function unparkPrefix(repoRoot, rel) {
   for (let i = 0; i < files.length; i++) {
     if (!isGitkeep(files[i])) moveSnapshotFile(repoRoot, files[i]);
   }
-  if (!listTreeFiles(dest, rel).length) {
+  const left = listTreeFiles(dest, rel);
+  if (left === null) return true;
+  if (!left.length) {
     try { fs.rmSync(dest, { recursive: true, force: true }); } catch (_) { /* 快照还在，下次再放回 */ }
   }
   return true;
@@ -393,37 +405,28 @@ function parkPrefix(repoRoot, rel) {
   }
 }
 
-// 整个目录改不走时，逐个改名。gitkeep 留在原地，避免目录变空。改名失败才复制内容。返回收进副本的路径。替身调用。
+// 整个目录改不走时逐个复制。先读完再写副本，读到一半失败不会留下一份残缺快照。gitkeep 不收进副本。替身调用。
 function copyPrefix(repoRoot, rel) {
   const files = listDiskFiles(repoRoot, rel);
-  const out = [];
+  if (files === null) throw new Error('名单目录正在被占用，没有完整副本，已停止以免删掉本地文件: ' + rel);
+  const blobs = [];
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     if (isGitkeep(file)) continue;
-    if (!moveFileToKeep(repoRoot, file)) {
-      saveLocalKeep(repoRoot, file, fs.readFileSync(worktreeFile(repoRoot, file)));
-    }
-    out.push(file);
+    blobs.push({ file: file, data: fs.readFileSync(worktreeFile(repoRoot, file)) });
+  }
+  const out = [];
+  for (let i = 0; i < blobs.length; i++) {
+    saveLocalKeep(repoRoot, blobs[i].file, blobs[i].data);
+    out.push(blobs[i].file);
   }
   return out;
-}
-
-function moveFileToKeep(repoRoot, rel) {
-  const abs = worktreeFile(repoRoot, rel);
-  const dest = keepFile(repoRoot, rel);
-  try {
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    if (pathExists(dest)) fs.unlinkSync(dest);
-    fs.renameSync(abs, dest);
-    return true;
-  } catch (_) {
-    return false;
-  }
 }
 
 // 改名没成功时，把副本里的文件写回工作区。
 function copyOutKeep(repoRoot, rel) {
   const files = listTreeFiles(keepFile(repoRoot, rel), rel);
+  if (files === null) return null;
   const out = [];
   for (let i = 0; i < files.length; i++) {
     atomicWriteFile(worktreeFile(repoRoot, files[i]), fs.readFileSync(keepFile(repoRoot, files[i])));
@@ -541,6 +544,7 @@ function removeWorktreeExtra(repoRoot, rel) {
 
 function dropExtraUnder(repoRoot, prefix, have) {
   const now = listDiskFiles(repoRoot, prefix);
+  if (now === null) return;
   for (let i = 0; i < now.length; i++) {
     if (have[now[i]]) continue;
     removeWorktreeExtra(repoRoot, now[i]);
@@ -575,27 +579,26 @@ function shimRestore(argv) {
   }
 }
 
-// 副本是改名过去的就改名回来。目标占着时再覆盖写。写回成功返回 true。替身调用。
+// 把单个副本覆盖写回工作区。写不回去返回 false，副本留着。替身调用。
 function restoreCopiedFile(repo, rel) {
-  const src = keepFile(repo, rel);
-  const dst = worktreeFile(repo, rel);
-  try {
-    fs.mkdirSync(path.dirname(dst), { recursive: true });
-    if (pathExists(dst)) fs.unlinkSync(dst);
-    fs.renameSync(src, dst);
-    return true;
-  } catch (_) { /* 文件被占住时改名失败，改为覆盖写回 */ }
   const data = readLocalKeep(repo, rel);
   if (!data) return false;
-  atomicWriteFile(dst, data);
-  return true;
+  try {
+    atomicWriteFile(worktreeFile(repo, rel), data);
+    return true;
+  } catch (err) {
+    if (dirBusy(err)) return false;
+    throw err;
+  }
 }
 
 function restoreLocal(repo, file, parsed, noteFallback) {
   const restored = [];
+  let held = false;
   for (let i = 0; i < parsed.copied.length; i++) {
     const rel = parsed.copied[i];
     if (restoreCopiedFile(repo, rel)) restored.push(rel);
+    else if (pathExists(keepFile(repo, rel))) held = true;
   }
   for (let i = 0; i < parsed.moved.length; i++) {
     const rel = parsed.moved[i];
@@ -605,6 +608,10 @@ function restoreLocal(repo, file, parsed, noteFallback) {
     }
     noteFallback();
     const files = copyOutKeep(repo, rel);
+    if (files === null) {
+      held = true;
+      continue;
+    }
     const have = {};
     for (let j = 0; j < files.length; j++) {
       have[files[j]] = true;
@@ -613,15 +620,17 @@ function restoreLocal(repo, file, parsed, noteFallback) {
     dropExtraUnder(repo, rel, have);
     try { fs.rmSync(keepFile(repo, rel), { recursive: true, force: true }); } catch (_) { /* 副本还在，下次再放回 */ }
   }
-  const have = {};
-  for (let i = 0; i < parsed.copied.length; i++) have[parsed.copied[i]] = true;
-  const list = localList(repo);
-  for (let i = 0; i < list.length; i++) {
-    const rel = slashRel(list[i]);
-    if (!rel || !canPark(rel) || underPrefix(rel, parsed.moved)) continue;
-    dropExtraUnder(repo, rel, have);
+  if (!held) {
+    const have = {};
+    for (let i = 0; i < parsed.copied.length; i++) have[parsed.copied[i]] = true;
+    const list = localList(repo);
+    for (let i = 0; i < list.length; i++) {
+      const rel = slashRel(list[i]);
+      if (!rel || !canPark(rel) || underPrefix(rel, parsed.moved)) continue;
+      dropExtraUnder(repo, rel, have);
+    }
+    forgetSnapList(repo, file);
   }
-  forgetSnapList(repo, file);
   try { applySkipWorktree(repo); } catch (_) { /* 位打不上不挡写回 */ }
   return restored;
 }

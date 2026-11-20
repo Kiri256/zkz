@@ -2202,6 +2202,89 @@ test('shim drops listed files that only exist on the other branch', () => {
   }
 });
 
+test('busy local directory is not treated as empty and is not deleted', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { shimPrepare, shimRestore } = require('../src/local_filter');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-local-busy-'));
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: root, windowsHide: true, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
+  };
+  const rename = fs.renameSync;
+  const readdir = fs.readdirSync;
+  const slash = (p) => String(p).replace(/\\/g, '/');
+  process.env.ZKZ_SHIM_TOKEN = 'busy-local';
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'a@b.c']);
+    git(['config', 'user.name', 't']);
+    git(['config', 'core.autocrlf', 'false']);
+    git(['config', 'zkz.localconfig', 'true']);
+    fs.mkdirSync(path.join(root, '.zkz'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.zkz', 'settings.json'), JSON.stringify({
+      native: { paths: ['keep'] }
+    }));
+    fs.mkdirSync(path.join(root, 'keep', 'locked'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'keep', 'a.txt'), 'tracked\n');
+    fs.writeFileSync(path.join(root, 'keep', 'locked', 'b.txt'), 'local-secret\n');
+    git(['add', '--', 'keep/a.txt']);
+    git(['commit', '-q', '-m', 'a']);
+    fs.renameSync = function (from, to) {
+      if (slash(from).endsWith('/keep') && slash(from).indexOf('/.zkz/local/') < 0) {
+        const err = new Error('busy');
+        err.code = 'EPERM';
+        throw err;
+      }
+      return rename(from, to);
+    };
+    fs.readdirSync = function (p, ...args) {
+      if (slash(p).endsWith('/keep/locked')) {
+        const err = new Error('busy');
+        err.code = 'EPERM';
+        throw err;
+      }
+      return readdir(p, ...args);
+    };
+    const argv = ['-C', root, 'checkout', 'other'];
+    let threw = false;
+    try { shimPrepare(argv); } catch (e) {
+      threw = true;
+      assert.ok(String(e && e.message).indexOf('没有完整副本') >= 0, String(e && e.message));
+    }
+    assert.strictEqual(threw, true);
+    assert.strictEqual(fs.readFileSync(path.join(root, 'keep', 'a.txt'), 'utf8'), 'tracked\n');
+    assert.strictEqual(fs.readFileSync(path.join(root, 'keep', 'locked', 'b.txt'), 'utf8'), 'local-secret\n');
+    fs.renameSync = rename;
+    fs.readdirSync = readdir;
+    shimPrepare(argv);
+    fs.mkdirSync(path.join(root, 'keep', 'locked'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'keep', 'locked', 'b.txt'), 'wiped-if-bug\n');
+    fs.readdirSync = function (p, ...args) {
+      if (slash(p).endsWith('/.zkz/local/keep')) {
+        const err = new Error('busy');
+        err.code = 'EPERM';
+        throw err;
+      }
+      return readdir(p, ...args);
+    };
+    shimRestore(argv);
+    assert.strictEqual(fs.readFileSync(path.join(root, 'keep', 'locked', 'b.txt'), 'utf8'), 'wiped-if-bug\n');
+    assert.strictEqual(fs.readFileSync(path.join(root, '.zkz', 'local', 'keep', 'locked', 'b.txt'), 'utf8'), 'local-secret\n');
+    fs.readdirSync = readdir;
+    shimRestore(argv);
+    assert.strictEqual(fs.readFileSync(path.join(root, 'keep', 'locked', 'b.txt'), 'utf8'), 'local-secret\n');
+    assert.strictEqual(fs.existsSync(path.join(root, '.zkz', 'local', 'keep', 'locked', 'b.txt')), false);
+  } finally {
+    fs.renameSync = rename;
+    fs.readdirSync = readdir;
+    delete process.env.ZKZ_SHIM_TOKEN;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('reapplying skip-worktree does not write the sidecar over a checkout', () => {
   const os = require('os');
   const fs = require('fs');
@@ -2275,6 +2358,109 @@ test('git invocation parser skips global options', () => {
   assert.strictEqual(wrapsInvocation(['reset', '--', 'keep.txt']), false);
   assert.strictEqual(wrapsInvocation(['restore', '--worktree', '--', 'keep.txt']), false);
   assert.strictEqual(wrapsInvocation(['commit', '-m', 'x']), false);
+});
+
+test('shim forces textconv on show diff blame log', () => {
+  const { forceTextconvArgs } = require('../src/git_shim');
+  assert.deepStrictEqual(
+    forceTextconvArgs(['-c', 'diff.zkznative.textconv=', '-c', 'core.quotepath=false', '-C', 'repo', 'diff', '--no-textconv', '--', 'a.c']),
+    ['-c', 'core.quotepath=false', '-C', 'repo', 'diff', '--textconv', '--', 'a.c']
+  );
+  assert.deepStrictEqual(
+    forceTextconvArgs(['-cdiff.zkznative.textconv=""', 'blame', '--no-textconv', '-L', '1,1']),
+    ['blame', '--textconv', '-L', '1,1']
+  );
+  assert.deepStrictEqual(
+    forceTextconvArgs(['show', '--textconv', 'HEAD:a.c']),
+    ['show', '--textconv', 'HEAD:a.c']
+  );
+  assert.deepStrictEqual(
+    forceTextconvArgs(['log', '-c', '--no-textconv']),
+    ['log', '--textconv', '-c']
+  );
+  assert.deepStrictEqual(
+    forceTextconvArgs(['-c', 'diff.zkznative.textconv=node x.js', 'diff']),
+    ['-c', 'diff.zkznative.textconv=node x.js', 'diff', '--textconv']
+  );
+  assert.deepStrictEqual(
+    forceTextconvArgs(['status', '--porcelain']),
+    ['status', '--porcelain']
+  );
+  assert.deepStrictEqual(
+    forceTextconvArgs(['diff', '--', '--no-textconv']),
+    ['diff', '--textconv', '--', '--no-textconv']
+  );
+});
+
+test('git shim exe adds textconv and drops a blank driver override', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+  const { ensureGitShim } = require('../src/git_shim');
+  const root = path.join(__dirname, '..');
+  const exe = ensureGitShim(root);
+  const windir = process.env.WINDIR || 'C:\\Windows';
+  const cscCandidates = [
+    path.join(windir, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe'),
+    path.join(windir, 'Microsoft.NET', 'Framework', 'v4.0.30319', 'csc.exe')
+  ];
+  let csc = '';
+  for (let i = 0; i < cscCandidates.length; i++) if (fs.existsSync(cscCandidates[i])) csc = cscCandidates[i];
+  assert.ok(csc, '找不到 csc.exe');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-shim-textconv-'));
+  const recorder = path.join(tmp, 'git-recorder.exe');
+  const log = path.join(tmp, 'args.txt');
+  const jsonPath = path.join(root, 'bin', 'git-shim.json');
+  const src = 'class R { static int Main(string[] a) {'
+    + 'string p = System.Environment.GetEnvironmentVariable("ZKZ_ARGV_LOG");'
+    + 'string n = System.Environment.GetEnvironmentVariable("GIT_CONFIG_COUNT") ?? "";'
+    + 'string k0 = System.Environment.GetEnvironmentVariable("GIT_CONFIG_KEY_0") ?? "";'
+    + 'string v0 = System.Environment.GetEnvironmentVariable("GIT_CONFIG_VALUE_0") ?? "";'
+    + 'string k1 = System.Environment.GetEnvironmentVariable("GIT_CONFIG_KEY_1") ?? "";'
+    + 'System.IO.File.WriteAllText(p, string.Join("\\n", a) + "\\n--\\n" + n + "\\n" + k0 + "\\n" + v0 + "\\n" + k1);'
+    + 'return 0; } }';
+  const cs = path.join(tmp, 'rec.cs');
+  fs.writeFileSync(cs, src);
+  try {
+    const compiled = spawnSync(csc, ['/nologo', '/out:' + recorder, cs], { encoding: 'utf8', windowsHide: true });
+    assert.strictEqual(compiled.status, 0, String(compiled.stderr || compiled.stdout));
+    const spec = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+    spec.realGit = recorder.replace(/\\/g, '/');
+    fs.writeFileSync(jsonPath, JSON.stringify(spec));
+    const env = Object.assign({}, process.env, {
+      ZKZ_ARGV_LOG: log,
+      GIT_CONFIG_COUNT: '2',
+      GIT_CONFIG_KEY_0: 'diff.zkznative.textconv',
+      GIT_CONFIG_VALUE_0: '',
+      GIT_CONFIG_KEY_1: 'core.quotepath',
+      GIT_CONFIG_VALUE_1: 'false'
+    });
+    const run = spawnSync(exe, ['-c', 'diff.zkznative.textconv=', 'diff', '--no-textconv', '--', 'a.c'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      env: env
+    });
+    assert.strictEqual(run.status, 0, String(run.stderr || run.stdout));
+    const got = fs.readFileSync(log, 'utf8').split(/\n/);
+    assert.deepStrictEqual(got.slice(0, 5), ['diff', '--textconv', '--', 'a.c', '--']);
+    assert.strictEqual(got[5], '1');
+    assert.strictEqual(got[6], 'core.quotepath');
+    assert.strictEqual(got[7], 'false');
+    assert.strictEqual(got[8], '');
+    const status = spawnSync(exe, ['status', '--porcelain'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      env: Object.assign({}, process.env, { ZKZ_ARGV_LOG: log })
+    });
+    assert.strictEqual(status.status, 0, String(status.stderr || status.stdout));
+    const statusArgs = fs.readFileSync(log, 'utf8').split(/\n/);
+    assert.deepStrictEqual(statusArgs.slice(0, 3), ['status', '--porcelain', '--']);
+    assert.ok(statusArgs.indexOf('--textconv') < 0);
+  } finally {
+    try { ensureGitShim(root); } catch (_) { /* 把 realGit 指回真正的 git */ }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('git shim reset --hard keeps a listed file and resets the others', () => {
@@ -2825,18 +3011,12 @@ test('keil branch switch rewrites only files that changed', () => {
     assert.strictEqual(fs.readFileSync(path.join(kn, 'a.c'), 'utf8'), 'int a;\n');
     assert.strictEqual(fs.readFileSync(path.join(kn, 'b.c'), 'utf8'), 'int changed;\n');
     assert.strictEqual(fs.existsSync(path.join(kn, 'c.c')), false);
-    const baseOid = git(['rev-parse', 'base']).trim();
-    const cachedSlot = path.join(dir, '.zkz', 'run', 'keil-cache', baseOid);
-    assert.strictEqual(fs.existsSync(path.join(cachedSlot, 'tree')), false);
-    const parked = JSON.parse(fs.readFileSync(path.join(cachedSlot, 'stamp.json'), 'utf8'));
-    assert.strictEqual(parked.manifest, true);
-    assert.strictEqual(parked.extras.length, 0);
+    assert.strictEqual(fs.existsSync(path.join(dir, '.zkz', 'run', 'keil-cache')), false);
     assert.strictEqual(fs.existsSync(flash), true);
     assert.strictEqual(syncKeilTree(dir).cacheHit, true);
     git(['checkout', '-q', baseBranch]);
     const back = syncKeilTree(dir);
-    assert.strictEqual(back.cacheHit, true);
-    assert.strictEqual(back.written, 0);
+    assert.strictEqual(back.written, 2);
     assert.strictEqual(fs.readFileSync(path.join(kn, 'a.c'), 'utf8'), 'int a;\n');
     assert.strictEqual(fs.readFileSync(path.join(kn, 'b.c'), 'utf8'), 'int b;\n');
     assert.strictEqual(fs.readFileSync(path.join(kn, 'c.c'), 'utf8'), 'int c;\n');
@@ -2845,62 +3025,7 @@ test('keil branch switch rewrites only files that changed', () => {
   }
 });
 
-test('legacy keil tree cache swaps even if its stamp says manifest', () => {
-  const os = require('os');
-  const fs = require('fs');
-  const path = require('path');
-  const { spawnSync } = require('child_process');
-  const { syncKeilTree } = require('../src/keil_tree');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zkz-keil-tree-'));
-  const git = (args) => {
-    const r = spawnSync('git', args, { cwd: dir, windowsHide: true, encoding: 'utf8' });
-    assert.strictEqual(r.status, 0, String(r.stderr || r.stdout));
-    return String(r.stdout || '');
-  };
-  try {
-    git(['init', '-q']);
-    git(['config', 'user.email', 'a@b.c']);
-    git(['config', 'user.name', 't']);
-    git(['config', 'core.autocrlf', 'false']);
-    git(['checkout', '-q', '-b', 'base']);
-    fs.mkdirSync(path.join(dir, 'User'));
-    fs.writeFileSync(path.join(dir, 'User', 'a.c'), 'int a;\n');
-    git(['add', 'User']);
-    git(['commit', '-q', '-m', 'base']);
-    const baseOid = git(['rev-parse', 'HEAD']).trim();
-    const blob = git(['rev-parse', 'HEAD:User/a.c']).trim();
-    syncKeilTree(dir);
-    git(['checkout', '-q', '-b', 'other']);
-    fs.writeFileSync(path.join(dir, 'User', 'a.c'), 'int other;\n');
-    git(['add', 'User/a.c']);
-    git(['commit', '-q', '-m', 'other']);
-    syncKeilTree(dir);
-    const slot = path.join(dir, '.zkz', 'run', 'keil-cache', baseOid);
-    fs.rmSync(slot, { recursive: true, force: true });
-    const treeFile = path.join(slot, 'tree', 'User', 'a.c');
-    fs.mkdirSync(path.dirname(treeFile), { recursive: true });
-    fs.writeFileSync(treeFile, 'int fromtree;\n');
-    fs.writeFileSync(path.join(slot, 'tree', '.zkz-sync-ready'), 'ready\n');
-    fs.writeFileSync(path.join(slot, 'stamp.json'), JSON.stringify({
-      version: 5,
-      head: baseOid,
-      branch: 'base',
-      complete: true,
-      manifest: true,
-      files: { 'User/a.c': 'b:' + blob },
-      targets: { 'User/a.c': '0|0|0|0' },
-      libraryFiles: {}
-    }));
-    git(['checkout', '-q', 'base']);
-    const back = syncKeilTree(dir);
-    assert.strictEqual(back.cacheHit, true);
-    assert.strictEqual(fs.readFileSync(path.join(dir, '.zkz', 'keil-native', 'User', 'a.c'), 'utf8'), 'int fromtree;\n');
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('cold keil cache copies only files that are not git blobs', () => {
+test('branch switch keeps an uncommitted keil copy aligned with the worktree', () => {
   const os = require('os');
   const fs = require('fs');
   const path = require('path');
@@ -2931,10 +3056,7 @@ test('cold keil cache copies only files that are not git blobs', () => {
     git(['add', 'User/b.c']);
     git(['commit', '-q', '-m', 'b']);
     syncKeilTree(dir);
-    const baseOid = git(['rev-parse', 'base']).trim();
-    const slot = path.join(dir, '.zkz', 'run', 'keil-cache', baseOid);
-    assert.strictEqual(fs.existsSync(path.join(slot, 'tree')), false);
-    assert.strictEqual(fs.readFileSync(path.join(slot, 'extra', 'User', 'a.c'), 'utf8'), 'int dirty;\n');
+    assert.strictEqual(fs.existsSync(path.join(dir, '.zkz', 'run', 'keil-cache')), false);
     git(['checkout', '-q', '-f', 'base']);
     syncKeilTree(dir);
     assert.strictEqual(fs.readFileSync(path.join(dir, '.zkz', 'keil-native', 'User', 'a.c'), 'utf8'), 'int a;\n');
@@ -2977,7 +3099,7 @@ test('partial keil restore does not rewrite the rest on the next sync', () => {
     git(['checkout', '-q', 'base']);
     fs.writeFileSync(path.join(dir, 'User', 'a.c'), 'int edited;\n');
     const partial = syncKeilTree(dir);
-    assert.strictEqual(partial.written, 1);
+    assert.strictEqual(partial.written, 2);
     const again = syncKeilTree(dir);
     assert.strictEqual(again.written, 0);
     assert.strictEqual(again.cacheHit, true);

@@ -27,7 +27,7 @@
 | `zkz-native.disable` | 卸 filter，按编码表把工作区编回原编码；未提交的修改保留 |
 | `zkz-native.refreshTable` | 按 HEAD 重建编码表 |
 | `zkz-native.syncKeilTree` | 把工作区 clean 到 `.zkz/keil-native/` |
-| `zkz-native.toggleLocalConfig` | 开关本地配置。开着时，给 `.zkz/settings.json` 里 `native.paths` 的已跟踪路径打上 `skip-worktree`，更改里不出现工作区修改。替身在检出、拉取、合并、变基、拣选、还原，以及 `reset --hard`、`--merge`、`--keep` 开始时把这些路径改名挪进 `.zkz/local`，结束后删掉 Git 写出的再挪回来。目录改名失败时先逐个改名文件，单个文件改不走才复制内容。`pre-commit` 把这些路径的索引收回 HEAD 的 blob，不改工作区 |
+| `zkz-native.toggleLocalConfig` | 开关本地配置。开着时，给 `.zkz/settings.json` 里 `native.paths` 的已跟踪路径打上 `skip-worktree`，更改里不出现工作区修改。替身在检出、拉取、合并、变基、拣选、还原，以及 `reset --hard`、`--merge`、`--keep` 开始时把这些路径改名挪进 `.zkz/local`，结束后删掉 Git 写出的再挪回来。改名失败才逐个复制。目录正在被占用、列不全时不删工作区，副本留在 `.zkz/local`。`pre-commit` 把这些路径的索引收回 HEAD 的 blob，不改工作区 |
 
 `.zkz/settings.json` 的 `native.paths` 是本地配置名单。开关记在本机 `zkz.localconfig`。开着时提交这些路径交出的是 HEAD 里的 blob，本机修改留在工作区。关掉之后，去掉 `skip-worktree`，差异重新出现在更改里。
 
@@ -35,7 +35,7 @@
 
 启用要求工作区干净。编码过滤器写在本机 `.git/info/attributes` 和 `.git/config`，不进仓库。`required=true`：起不来时 git 会失败，这是为了避免把错误编码写进仓库。本地配置只写本机 `zkz.localconfig`，不再占用 attributes。
 
-git hook 只保留 `pre-commit` / `pre-push`（挡坏提交/推送）。本地配置开着时，`pre-commit` 还会把名单路径的索引收回 HEAD 的 blob。编码过滤器或本地配置开着时监视 `.git/HEAD` 和 `refs/heads`。分支名变了才刷新编码表，同分支上的提交和撤回不刷表。HEAD 监视在提交或检出之后只重新打上 `skip-worktree`，不改文件内容。文件内容只由替身写回。检出、拉取、合并、变基、拣选、还原，以及 `reset --hard`、`--merge`、`--keep` 会先经过扩展目录里的 `git.exe`。它在命令开始时把名单文件收进 `.zkz/local`，让 Git 看到没改过，结束后写回并删掉。替身不放进仓库。`git.path` 和终端 PATH 写在用户设置里，指向当前扩展的 `bin`。关掉本地配置不改这两项。两个开关都关掉才停止监视。不再走 `post-checkout` 等 hook。本地配置开关和编码过滤器各自独立，切分支时不再询问还原。
+git hook 只保留 `pre-commit` / `pre-push`（挡坏提交/推送）。本地配置开着时，`pre-commit` 还会把名单路径的索引收回 HEAD 的 blob。编码过滤器或本地配置开着时监视 `.git/HEAD` 和 `refs/heads`。分支名变了才刷新编码表，同分支上的提交和撤回不刷表。HEAD 监视在提交或检出之后只重新打上 `skip-worktree`，不改文件内容。文件内容只由替身写回。检出、拉取、合并、变基、拣选、还原，以及 `reset --hard`、`--merge`、`--keep` 会先经过扩展目录里的 `git.exe`。它在命令开始时把名单文件收进 `.zkz/local`，让 Git 看到没改过，结束后写回并删掉。`show`、`diff`、`blame`、`log` 会补上 `--textconv`，并去掉 `--no-textconv`，以及把 `diff.<驱动>.textconv` 设成空的 `-c` 和 `GIT_CONFIG_*`。`status` 不改参数。替身不放进仓库。`git.path` 和终端 PATH 写在用户设置里，指向当前扩展的 `bin`。关掉本地配置不改这两项。两个开关都关掉才停止监视。不再走 `post-checkout` 等 hook。本地配置开关和编码过滤器各自独立，切分支时不再询问还原。
 
 过滤器异常时运行 **zkz-native.disable** 即可卸掉（只改 `.git/config` 与 attributes，不依赖 filter 进程）。
 
@@ -72,7 +72,7 @@ pkt-line 输入使用分块队列，收到数据时不再复制全部未消费�
 
 stamp 的失效条件包括算法版本、HEAD、分支、编码映射内容和库目录快照。编码规则、库分类或库目录存在情况变化时全量重建；缺少完成标记或旧版本 stamp 也会全量重建，覆盖中断操作已写出的文件。项目目录的 `Obj/Flash` 等跳过目录仍保留 `.sct/.ini/.scf`，其他编译产物继续跳过。
 
-增量同步同时检查 stamp 中目标文件的大小、mtime、ctime 和文件编号。编烧文件被外部覆盖、替换或删除后，下次同步会恢复对应文件；其他源文件同时修改也不影响恢复。实际同步写入前清除完成标记，全部完成后再生成，避免中断操作留下可命中的旧标记。命中缓存仍检查每个编烧副本，不用超时跳过；换树命中时这一遍记下新时间，不再扫第二遍。索引里的 blob 没变时，没被点名的已跟踪源文件不再 stat。目标元数据变化时直接重新生成，避免额外读取并哈希整个目标文件。源或目标内容与全部上述元数据都被外部工具恢复成相同值时，元数据检查无法识别，应清除完成标记后全量同步；此机制不是逐字节内容校验。同步命令在开始前对上编码表：同分支新提交只改表里的提交号，换分支才重算，同步本身不再空等。换提交不再把整棵编烧树复制进缓存。和 git blob 一致的文件只留戳，切回来按差异用 git 写回；工作区改过、还没入库的副本才复制到 `keil-cache/<提交号>/extra`。以前已经复制好的整棵 `tree` 仍可改名换上。
+增量同步同时检查 stamp 中目标文件的大小、mtime、ctime 和文件编号。编烧文件被外部覆盖、替换或删除后，下次同步会恢复对应文件；其他源文件同时修改也不影响恢复。实际同步写入前清除完成标记，全部完成后再生成，避免中断操作留下可命中的旧标记。命中缓存仍检查每个编烧副本，不用超时跳过。索引里的 blob 没变时，没被点名的已跟踪源文件不再 stat。目标元数据变化时直接重新生成，避免额外读取并哈希整个目标文件。源或目标内容与全部上述元数据都被外部工具恢复成相同值时，元数据检查无法识别，应清除完成标记后全量同步；此机制不是逐字节内容校验。同步命令在开始前对上编码表：同分支新提交只改表里的提交号，换分支才重算，同步本身不再空等。换提交不另存编烧树。和 git blob 一致的文件只留戳，切回来按差异重写。
 
 库源文件也保留元数据快照，只在变化时检查编码。已有库告警会在其他文件更新及缓存命中时继续保留，修复对应库文件后清除。项目辅助文件每次重新枚举，能发现 Git 忽略的新增链接脚本。普通业务文件的新建仍遵循 Git ignore；已经复制的文件即使被忽略，后续修改和删除仍会检查。
 
@@ -84,6 +84,6 @@ stamp 的失效条件包括算法版本、HEAD、分支、编码映射内容和�
 
 - 换机器 / CI 没装本地 filter 时，检出的是原始 GBK，通常无所谓。
 - 非 `.c/.h`（如 `.uvproj`）保持原字节，工具可能乱码。
-- VS Code 内置内联 diff 左侧对 GBK blob 仍可能乱码；CLI `git diff` 有 textconv。
+- Cursor 查看 diff、blame、历史时不跑仓库里的 textconv。替身只在调用这个 `git.exe` 的 `show` / `diff` / `blame` / `log` 上把转换加回去。用 `cat-file` 或进程内直接读 blob 时，左侧仍是 GBK。
 - 表里没有的已跟踪文件按索引 blob 登记，不按工作区 UTF-8 登记。GBK 文件改名后若暂存成了 UTF-8，提交会被拒绝，编码表改回 GBK，需要重新 `git add`。原先登记为 ASCII 的文件一旦写入中文，能进 cp936 的会改记为 GBK 再提交。
 - 库目录不过滤，编码没有 clean 兜底；编烧树里仍是 junction。改过的库 `.c/.h` 会在同步编烧树、提交和推送时巡检：HEAD 为 GBK 而当前变成 UTF-8，或出现 U+FFFD，会写入 `.zkz/run/encoding-lib-warnings.json` 并告警，不改文件、不拦编译、不拦提交。
